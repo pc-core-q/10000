@@ -1,8 +1,11 @@
 /* ==========================================================================
    admin.js
    منطق لوحة تحكم الأدمن بالكامل (admin.html). 
-   تم التحديث: حصر سحب الطلبات بآخر 300 طلب مرة واحدة، وتحسين مصغرات الصور،
-   ورفع رقم إصدار الأقسام والإعلانات ws_meta_v لحظياً لتحديث الزوار فوراً.
+   تم التحديث: 
+   1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
+   2) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
+   3) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
+   4) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -14,6 +17,239 @@ let pendingAdImage = null;
 let pendingColors = [];        // [{ name, hex, image }]
 let pendingSizes = [];         // ["S", "M", ...]
 let pendingInventory = {};     // { "لون||مقاس": qty }
+
+// جدول الألوان الشائعة لتحويل الأسماء إلى درجات Hex تلقائياً
+const COLOR_HEX_MAP = {
+  "أسود": "#000000", "اسود": "#000000", "black": "#000000",
+  "أبيض": "#ffffff", "ابيض": "#ffffff", "white": "#ffffff",
+  "أحمر": "#ef4444", "احمر": "#ef4444", "red": "#ef4444",
+  "أزرق": "#3b82f6", "ازرق": "#3b82f6", "blue": "#3b82f6",
+  "أخضر": "#22c55e", "اخضر": "#22c55e", "green": "#22c55e",
+  "أصفر": "#eab308", "اصفر": "#eab308", "yellow": "#eab308",
+  "بيج": "#f5f5dc", "beige": "#f5f5dc",
+  "رمادي": "#6b7280", "رصاصي": "#6b7280", "gray": "#6b7280", "grey": "#6b7280",
+  "بني": "#854d0e", "brown": "#854d0e",
+  "وردي": "#ec4899", "زهري": "#ec4899", "pink": "#ec4899",
+  "بنفسجي": "#8b5cf6", "purple": "#8b5cf6",
+  "برتقالي": "#f97316", "orange": "#f97316",
+  "كحلي": "#1e3a8a", "navy": "#1e3a8a",
+  "ذهبي": "#eab308", "gold": "#eab308",
+  "فضي": "#d1d5db", "silver": "#d1d5db"
+};
+
+function getColorHex(colorName) {
+  if (!colorName) return "#7c9a4c";
+  const clean = colorName.trim().toLowerCase();
+  return COLOR_HEX_MAP[clean] || "#7c9a4c";
+}
+
+// دالة توحيد الحروف للمطابقة الذكية النظيفة
+function cleanNameForMatch(str) {
+  if (!str) return "";
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[\s\-_/]+/g, " ");
+}
+
+/* ---------------------------------------------------------------------- */
+/* دالة الإنشاء السريع للقسم وتحديث القوائم في الكروت                      */
+/* ---------------------------------------------------------------------- */
+function fastAddCategory(catName) {
+  if (!catName || !catName.trim()) return null;
+  const clean = cleanNameForMatch(catName);
+  const categories = Store.getCategories();
+  const existing = categories.find(c => cleanNameForMatch(c.name) === clean);
+  if (existing) return existing.id;
+
+  const newCat = Store.addCategory({
+    name: catName.trim(),
+    image: null,
+    icon: "box",
+    parentId: ""
+  });
+
+  if (newCat) {
+    bumpMetaVersion();
+    populateCategorySelect();
+    renderCategoriesTable();
+    showToast(`تمت إضافة قسم "${catName.trim()}" بنجاح!`, "success");
+    return newCat.id;
+  }
+  return null;
+}
+
+function refreshAllBatchCategorySelects(targetCard = null, selectId = null) {
+  const container = document.getElementById("shelfDetectedList");
+  if (!container) return;
+  const categories = Store.getCategories();
+  const catOptions = '<option value="">-- بدون قسم --</option>' + categories.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join("");
+
+  const cards = container.querySelectorAll(".shelf-item-card");
+  cards.forEach(card => {
+    const sel = card.querySelector(".shelf-item-category");
+    if (!sel) return;
+    const currentVal = (card === targetCard && selectId) ? selectId : sel.value;
+    sel.innerHTML = catOptions;
+    sel.value = currentVal;
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* شاشة التحميل المتوافقة مع دليل التصميم ونظام الثيمات                   */
+/* ---------------------------------------------------------------------- */
+let _processLoaderTimer = null;
+
+function showProcessLoader(title = "جارٍ معالجة البيانات...", customSteps = []) {
+  let overlay = document.getElementById("processLoadingOverlay");
+
+  if (!overlay) {
+    const style = document.createElement("style");
+    style.id = "processLoaderStyles";
+    style.textContent = `
+      #processLoadingOverlay {
+        position: fixed;
+        inset: 0;
+        background: var(--overlay, rgba(15, 23, 42, 0.65));
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        z-index: 999999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        font-family: var(--font-body, inherit);
+      }
+      #processLoadingOverlay.active { opacity: 1; }
+      .process-loader-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        width: 100%;
+        max-width: 400px;
+        border-radius: var(--r-card, 14px);
+        padding: 28px 24px;
+        text-align: center;
+        box-shadow: var(--shadow-card, 0 10px 25px -5px rgba(0, 0, 0, 0.1));
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+        transform: scale(0.95);
+        transition: transform 0.25s ease;
+      }
+      #processLoadingOverlay.active .process-loader-card { transform: scale(1); }
+      .process-spinner {
+        width: 44px;
+        height: 44px;
+        border: 3px solid var(--border-soft, rgba(var(--text-rgb, 15, 23, 42), 0.1));
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        animation: processSpin 0.85s linear infinite;
+      }
+      @keyframes processSpin {
+        to { transform: rotate(360deg); }
+      }
+      .process-loader-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--heading-color, var(--primary));
+        margin: 0;
+      }
+      .process-loader-step {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        min-height: 20px;
+        margin: 0;
+        transition: opacity 0.2s ease;
+      }
+      .process-progress-track {
+        width: 100%;
+        height: 5px;
+        background: var(--surface-2, rgba(var(--text-rgb, 15, 23, 42), 0.05));
+        border-radius: var(--r-ctl, 999px);
+        overflow: hidden;
+        position: relative;
+        margin-top: 4px;
+      }
+      .process-progress-bar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 35%;
+        background: var(--primary);
+        border-radius: var(--r-ctl, 999px);
+        animation: processProgressLoop 1.6s infinite ease-in-out;
+      }
+      @keyframes processProgressLoop {
+        0% { left: -35%; width: 25%; }
+        50% { width: 55%; }
+        100% { left: 100%; width: 25%; }
+      }
+    `;
+    document.head.appendChild(style);
+
+    overlay = document.createElement("div");
+    overlay.id = "processLoadingOverlay";
+    overlay.innerHTML = `
+      <div class="process-loader-card">
+        <div class="process-spinner"></div>
+        <h3 class="process-loader-title" id="processLoaderTitle">${title}</h3>
+        <p class="process-loader-step" id="processLoaderStep">جارٍ فحص الملف...</p>
+        <div class="process-progress-track">
+          <div class="process-progress-bar"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+  }
+
+  const titleEl = document.getElementById("processLoaderTitle");
+  const stepEl = document.getElementById("processLoaderStep");
+  if (titleEl) titleEl.textContent = title;
+
+  const defaultSteps = [
+    "جارٍ قراءة البيانات واستخراج السطور...",
+    "جارٍ مطابقة الأسماء والأسعار والكميات...",
+    "جارٍ فرز المتغيرات وبناء جدول المخزون...",
+    "جارٍ تجهيز شاشة المراجعة..."
+  ];
+
+  const steps = customSteps.length ? customSteps : defaultSteps;
+  let currentStepIdx = 0;
+  if (stepEl) stepEl.textContent = steps[0];
+
+  clearInterval(_processLoaderTimer);
+  _processLoaderTimer = setInterval(() => {
+    currentStepIdx = (currentStepIdx + 1) % steps.length;
+    if (stepEl) {
+      stepEl.style.opacity = "0";
+      setTimeout(() => {
+        stepEl.textContent = steps[currentStepIdx];
+        stepEl.style.opacity = "1";
+      }, 150);
+    }
+  }, 2200);
+
+  overlay.style.display = "flex";
+  setTimeout(() => overlay.classList.add("active"), 10);
+}
+
+function hideProcessLoader() {
+  clearInterval(_processLoaderTimer);
+  const overlay = document.getElementById("processLoadingOverlay");
+  if (overlay) {
+    overlay.classList.remove("active");
+    setTimeout(() => {
+      overlay.style.display = "none";
+    }, 250);
+  }
+}
 
 /* ---------------------------------------------------------------------- */
 /* دالة مساعدة لرفع رقم نسخة الأقسام والإعلانات والإعدادات لحظياً         */
@@ -29,9 +265,23 @@ function bumpMetaVersion() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* ملاحظة: escapeHtml و jsStr معرّفتان في app.js (يُحمَّل قبل هذا الملف)   */
+/* مساعدة لتحويل DataURL إلى كائن Blob لرفعه إلى ImgBB                     */
 /* ---------------------------------------------------------------------- */
+function dataURLtoBlob(dataurl) {
+  const arr = dataurl.split(',');
+  const mime = arr[0].match(/:(.*?);/)[1];
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new Blob([u8arr], { type: mime });
+}
 
+/* ---------------------------------------------------------------------- */
+/* بدء تشغيل الصفحة والتهيئة                                              */
+/* ---------------------------------------------------------------------- */
 async function initAdminPage() {
   const app = document.getElementById("adminApp");
   if (!app) return;
@@ -40,18 +290,14 @@ async function initAdminPage() {
     if (!isAuthed) return;
   }
 
-  // سحب مباشر لبيانات السيرفر مرة واحدة بدون تكرار وسحب آخر 300 طلب فقط
   await pullFromFirebase(true);
-  // وضع الأدمن الخفيف: الفهرس فقط (تفاضلياً) — المنتج الكامل يُجلب عند فتح تعديله، وكل الكتالوج عند الاستيراد فقط
   await Store.loadAdminCatalog();
   await Store.loadOrdersFromFirebase(300);
 
-  // التأكد من بناء الفهرس ومزامنته
   Store.rebuildIndex(false).then(function (ok) {
     if (!ok) showAdminBanner("تعذّر إنشاء/قراءة فهرس المتجر ws_index. أضف قاعدة ws_index إلى Firebase Rules ثم حدّث الصفحة.");
   });
 
-  // بنية المنتجات القديمة (مصفوفة): تُرحَّل تلقائياً وبلا فقد بيانات عند أول حفظ إلى ws_products/{id}
   if (Store.needsKeyedMigration && Store.needsKeyedMigration()) {
     showAdminBanner("بنية المنتجات على الخادم ما زالت القديمة (مصفوفة). سيُرحَّلها المتجر تلقائياً إلى ws_products/{id} عند أول حفظ (مرة واحدة، دفعات آمنة). لا تغلق الصفحة أثناء الترحيل.");
   }
@@ -59,7 +305,6 @@ async function initAdminPage() {
   document.addEventListener("store:migration-done", function () { showToast("اكتمل ترحيل المنتجات إلى البنية الجديدة.", "success"); });
   document.addEventListener("store:migration-failed", function () { showToast("تعذّر ترحيل بنية المنتجات (راجع الـ Console). لم تُفقد أي بيانات؛ حدّث الصفحة وأعد المحاولة.", "error"); });
 
-  // إن لم يجهز الفهرس (قواعد Firebase/الشبكة) نمنع الحفظ لحماية البيانات
   if (!Store.canWriteNode()) {
     showAdminBanner("تعذّر تحميل فهرس المنتجات من الخادم، لذلك أُوقف حفظ/حذف المنتجات مؤقتاً لحماية بياناتك. تحقق من الاتصال وقواعد Firebase (ws_index) ثم حدّث الصفحة.");
   }
@@ -87,7 +332,12 @@ async function initAdminPage() {
   wireCategoryModal();
   wireAdModal(); 
   wireSettingsForm();
+
+  // تفعيل الميزات الذكية وإدارات الاستيراد
   wireExcelSync();
+  wireInvoiceScanner();
+  wireShelfScanner();
+  wireAiPricing();
 
   wireProductsTableEvents();
   wireOutOfStock();
@@ -96,7 +346,7 @@ async function initAdminPage() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* إشعار "تم تحديث الموقع" — يظهر مرة واحدة فقط لكل إصدار                */
+/* إشعار "تم تحديث الموقع"                                                */
 /* ---------------------------------------------------------------------- */
 const UPDATE_NOTICE_ID = "2026-10-19";
 const UPDATE_NOTICE_KEY = "ws_admin_update_seen";
@@ -137,32 +387,29 @@ function ensureProductsWritable() {
   return false;
 }
 
-// العمليات الجماعية (الاستيراد) تحتاج كل المنتجات لمطابقتها واكتشاف المحذوف: نحمّلها عند الطلب فقط
 async function ensureFullCatalogForBulk() {
   if (Store.canWriteProducts()) return true;
-  showToast("جارٍ تحميل كل المنتجات من الخادم لإتمام الاستيراد…");
+  showToast("جارٍ تحميل كل المنتجات من الخادم لإتمام العملية…");
   await Store.ensureAllProductsFresh();
   if (Store.canWriteProducts()) return true;
-  showToast("تعذّر تحميل كل المنتجات، أُوقف الاستيراد لحماية بياناتك. تحقق من الاتصال وأعد المحاولة.", "error");
+  showToast("تعذّر تحميل كل المنتجات، أُوقفت العملية لحماية بياناتك. تحقق من الاتصال وأعد المحاولة.", "error");
   return false;
 }
 
-// فتح منتج للتعديل: نجلب نسخته الكاملة الطازجة (وصف/صور/مخزون التركيبات) لأن الجدول يعمل على الفهرس الخفيف
 async function openProductForEdit(productId) {
   if (!productId) { openProductModal(null); return; }
   let p = null;
   try { p = await Store.loadProductFresh(productId); } catch (e) { console.error(e); }
   if (!p) {
-    showToast("تعذّر تحميل المنتج من الخادم (ربما حُذف من جهاز آخر). حدّث الصفحة.", "error");
+    showToast("تعذّر تحميل المنتج من الخادم. حدّث الصفحة.", "error");
     return;
   }
   openProductModal(productId);
 }
 
 /* ---------------------------------------------------------------------- */
-/* مزامنة البيانات مع محرك البحث Algolia                                  */
+/* مزامنة البيانات مع Algolia                                             */
 /* ---------------------------------------------------------------------- */
-
 let _algoliaKeyDeclined = false;
 function algoliaConfigured() {
   const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
@@ -171,7 +418,6 @@ function algoliaConfigured() {
 function getAlgoliaAdminKey() {
   const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
   if (cfg.algoliaAdminKey && !String(cfg.algoliaAdminKey).startsWith("YOUR_")) {
-    console.warn("تحذير أمني: algoliaAdminKey موجود في config.js وهو ظاهر لكل زائر. احذفه وبدّل المفتاح من لوحة Algolia.");
     return String(cfg.algoliaAdminKey);
   }
   try { return sessionStorage.getItem("ws_algolia_admin_key") || ""; } catch (e) { return ""; }
@@ -180,10 +426,10 @@ function requestAlgoliaAdminKey() {
   if (!algoliaConfigured()) return "";
   let key = getAlgoliaAdminKey();
   if (key || _algoliaKeyDeclined) return key;
-  key = (window.prompt("لمزامنة محرك البحث Algolia أدخل مفتاح Admin API Key (يُحفظ لهذه الجلسة فقط ولا يُرسل لأي مكان آخر).\nاضغط إلغاء لتخطي المزامنة في هذه الجلسة.") || "").trim();
+  key = (window.prompt("لمزامنة محرك البحث Algolia أدخل مفتاح Admin API Key:\nاضغط إلغاء لتخطي المزامنة.") || "").trim();
   if (!key) {
     _algoliaKeyDeclined = true;
-    showToast("تم تخطي مزامنة Algolia في هذه الجلسة.", "error");
+    showToast("تم تخطي مزامنة Algolia.", "error");
     return "";
   }
   try { sessionStorage.setItem("ws_algolia_admin_key", key); } catch (e) {}
@@ -223,10 +469,7 @@ async function syncProductsToAlgolia(productsList) {
         }
       });
     } else {
-      requests.push({
-        action: "deleteObject",
-        body: { objectID: p.id }
-      });
+      requests.push({ action: "deleteObject", body: { objectID: p.id } });
     }
   });
 
@@ -242,7 +485,7 @@ async function syncProductsToAlgolia(productsList) {
       },
       body: JSON.stringify({ requests })
     });
-    if (!res.ok) console.error("Algolia sync response error:", await res.text());
+    if (!res.ok) console.error("Algolia sync error:", await res.text());
   } catch (err) {
     console.error("فشل مزامنة Algolia:", err);
   }
@@ -270,16 +513,795 @@ async function deleteProductFromAlgolia(productId) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* مزامنة واستيراد الأسعار والمخزون عبر ملفات Excel / CSV                 */
+/* 1) ميزة التسعير بالأوامر الطبيعية                                     */
 /* ---------------------------------------------------------------------- */
+function wireAiPricing() {
+  const btn = document.getElementById("btnExecutePriceCommand");
+  const input = document.getElementById("aiPriceCommandInput");
+  if (!btn || !input || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
 
+  btn.addEventListener("click", async () => {
+    const command = input.value.trim();
+    if (!command) {
+      showToast("يرجى كتابة أمر التسعير أولاً", "error");
+      input.focus();
+      return;
+    }
+
+    if (!window.StoreAI || typeof window.StoreAI.parsePriceCommand !== "function") {
+      showToast("ملف js/ai.js غير محمل أو لا يدعم التسعير", "error");
+      return;
+    }
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = "جارٍ التحليل... ⏳";
+
+    try {
+      const categories = Store.getCategories();
+      const categoryNames = categories.map(c => c.name);
+      const plan = await window.StoreAI.parsePriceCommand(command, categoryNames);
+
+      if (!plan || !plan.action) {
+        throw new Error("لم يتمكن النظام من فهم الأمر بدقة. أعد صياغته بوضوح.");
+      }
+
+      const confirmMsg = `سيتم تطبيق الإجراء التالي:\n"${plan.summary || command}"\n\nهل تريد تأكيد التعديل وتحديث الأسعار؟`;
+      if (!confirm(confirmMsg)) return;
+
+      if (!(await ensureFullCatalogForBulk())) return;
+
+      let products = Store.getProducts();
+      let matchedCat = null;
+      if (plan.category) {
+        matchedCat = categories.find(c => 
+          c.name.toLowerCase().includes(plan.category.toLowerCase()) || 
+          plan.category.toLowerCase().includes(c.name.toLowerCase())
+        );
+      }
+
+      let affectedCount = 0;
+      const touchedProducts = [];
+
+      products.forEach(p => {
+        if (matchedCat && p.categoryId !== matchedCat.id) return;
+        
+        let curPrice = Number(p.price) || 0;
+        let curOldPrice = Number(p.oldPrice) || 0;
+
+        if (plan.minPrice !== null && plan.minPrice !== undefined && curPrice < plan.minPrice) return;
+        if (plan.maxPrice !== null && plan.maxPrice !== undefined && curPrice > plan.maxPrice) return;
+
+        let modified = false;
+
+        if (plan.action === "discount_percent") {
+          const pct = Math.min(100, Math.max(0, Number(plan.value) || 0));
+          if (pct > 0) {
+            if (!curOldPrice || curOldPrice <= curPrice) p.oldPrice = curPrice;
+            p.price = Math.round(curPrice * (1 - pct / 100));
+            p.isOffer = true;
+            modified = true;
+          }
+        } else if (plan.action === "discount_fixed") {
+          const val = Number(plan.value) || 0;
+          if (val > 0) {
+            if (!curOldPrice || curOldPrice <= curPrice) p.oldPrice = curPrice;
+            p.price = Math.max(0, curPrice - val);
+            p.isOffer = true;
+            modified = true;
+          }
+        } else if (plan.action === "increase_percent") {
+          const pct = Number(plan.value) || 0;
+          if (pct > 0) {
+            p.price = Math.round(curPrice * (1 + pct / 100));
+            modified = true;
+          }
+        } else if (plan.action === "increase_fixed") {
+          const val = Number(plan.value) || 0;
+          if (val > 0) {
+            p.price = curPrice + val;
+            modified = true;
+          }
+        } else if (plan.action === "reset_discount") {
+          if (curOldPrice && curOldPrice > curPrice) {
+            p.price = curOldPrice;
+            p.oldPrice = 0;
+            p.isOffer = false;
+            modified = true;
+          }
+        }
+
+        if (modified) {
+          affectedCount++;
+          touchedProducts.push(p);
+        }
+      });
+
+      if (affectedCount === 0) {
+        showToast("لم يتم العثور على منتجات مطابقة لتطبيق هذا الأمر", "error");
+        return;
+      }
+
+      const saved = await Store.saveProducts(products);
+      if (saved === false) {
+        showToast("تعذّر حفظ الأسعار على الخادم. حدّث الصفحة وأعد المحاولة.", "error");
+        return;
+      }
+
+      await syncProductsToAlgolia(touchedProducts);
+      renderProductsTable();
+      renderStats();
+      showToast(`تم بنجاح تحديث أسعار ${affectedCount} منتج ✨`, "success");
+      input.value = "";
+    } catch (err) {
+      console.error(err);
+      showToast(err.message || "فشل تنفيذ أمر التسعير", "error");
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    }
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* 2) النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة                   */
+/* ---------------------------------------------------------------------- */
+function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد البضائع المستخرجة 📦") {
+  const modal = document.getElementById("shelfScanModal");
+  const container = document.getElementById("shelfDetectedList");
+  const statusText = document.getElementById("shelfScanStatus");
+  const titleEl = document.getElementById("batchModalTitle");
+  const selectAllChk = document.getElementById("batchSelectAll");
+  const counterEl = document.getElementById("batchSelectedCounter");
+
+  if (!modal || !container) return;
+
+  if (titleEl) titleEl.textContent = modalTitle;
+  container.innerHTML = "";
+
+  const categories = Store.getCategories();
+  const catOptions = '<option value="">-- بدون قسم --</option>' + categories.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join("");
+
+  const updateCounter = () => {
+    const total = container.querySelectorAll(".shelf-item-card").length;
+    const selected = container.querySelectorAll(".shelf-item-check:checked").length;
+    if (counterEl) counterEl.textContent = `المحدد للحفظ: ${selected} من أصل ${total}`;
+    if (selectAllChk) selectAllChk.checked = (selected === total && total > 0);
+  };
+
+  items.forEach((item, idx) => {
+    const initialName = item.name || `منتج ${idx + 1}`;
+    const initialPrice = item.price !== null && item.price !== undefined ? item.price : "";
+    const initialStock = item.stock !== null && item.stock !== undefined ? item.stock : 1;
+    const currentStock = item.currentStock !== null && item.currentStock !== undefined ? item.currentStock : null;
+    const initialBarcode = item.barcode || "";
+    const initialDesc = item.description || "";
+    const initialColors = (item.colors || []).join(", ");
+    const initialSizes = (item.sizes || []).join(", ");
+    const existingId = item.existingId || "";
+    const isUpdate = !!existingId;
+
+    const statusBadge = isUpdate
+      ? `<span class="pill pill-warn" style="font-size:0.75rem;" title="سيتم إضافة هذه الكمية إلى رصيد المتجر الحالي">تحديث رصيد (+${initialStock}) 🔄</span>`
+      : '<span class="pill pill-ok" style="font-size:0.75rem;">منتج جديد ✨</span>';
+
+    const searchGoogleUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(initialName + ' product white background')}`;
+    const displayImg = item.image
+      ? `<img class="shelf-item-img" src="${escapeHtml(item.image)}" style="max-width:100%; max-height:100%; object-fit:contain;">`
+      : `<div class="shelf-item-placeholder" style="display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--ink-300); font-size:12px; gap:4px;">${iconSvg("box")}<span>لا توجد صورة</span></div>`;
+
+    const card = document.createElement("div");
+    card.className = "shelf-item-card";
+    card.setAttribute("data-existing-id", existingId);
+    card.style.cssText = "background:var(--surface); border:1px solid var(--line-strong); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:8px;";
+
+    // تجهيز شريحة القسم المقترح إن لم يكن مطابقاً
+    const cleanSuggestedCat = cleanNameForMatch(item.category);
+    const hasCatMatch = item.categoryId || (cleanSuggestedCat && categories.some(c => cleanNameForMatch(c.name) === cleanSuggestedCat));
+    const showSuggestedChip = !hasCatMatch && item.category && item.category.trim();
+
+    card.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        ${statusBadge}
+        <span style="font-size:0.75rem; color:var(--ink-400); font-family:monospace;">${escapeHtml(initialBarcode || '—')}</span>
+      </div>
+
+      <div class="shelf-img-box" style="height:130px; border-radius:6px; overflow:hidden; background:#fff; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); position:relative;">
+        ${displayImg}
+      </div>
+
+      <!-- أدوات التعامل مع الصورة -->
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+        <a href="${searchGoogleUrl}" target="_blank" rel="noopener noreferrer" class="btn btn-outline btn-sm btn-google-search" style="flex:1; text-align:center; padding:4px 6px; font-size:11px; text-decoration:none; background:#fff;" title="البحث في صور Google">
+          🔍 صور Google
+        </a>
+        <button type="button" class="btn-paste-url" style="background:none; border:none; color:var(--primary); cursor:pointer; font-size:11px; text-decoration:underline;">🔗 رابط</button>
+        <label style="color:var(--primary); cursor:pointer; font-size:11px; text-decoration:underline; margin:0;">
+          📁 رفع
+          <input type="file" accept="image/*" class="shelf-card-file" style="display:none;">
+        </label>
+      </div>
+
+      <input type="text" class="shelf-item-name" value="${escapeHtml(initialName)}" placeholder="اسم المنتج الأساسي" style="padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-weight:600;">
+      
+      <!-- اختيار أو إنشاء القسم بسرعة -->
+      <div>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <select class="shelf-item-category" style="flex:1; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-family:inherit; background:var(--surface); color:var(--text);">
+            ${catOptions}
+          </select>
+          <button type="button" class="btn-quick-add-cat" title="إضافة قسم جديد وتعيينه" style="padding:6px 10px; border:1px solid var(--border); background:var(--surface); color:var(--primary); border-radius:6px; cursor:pointer; font-weight:bold; font-size:0.95rem; line-height:1;">
+            +
+          </button>
+        </div>
+        ${showSuggestedChip ? `
+          <div class="suggested-cat-chip" style="font-size:0.75rem; color:var(--text-2); display:flex; align-items:center; gap:4px; margin-top:4px;">
+            <span>قسم مقترح: <strong>${escapeHtml(item.category)}</strong></span>
+            <button type="button" class="btn-create-suggested-cat" data-cat-name="${escapeHtml(item.category)}" style="background:none; border:none; color:var(--primary); text-decoration:underline; cursor:pointer; font-size:0.75rem; padding:0; font-weight:600;">
+              [+ إنشاء واختيار]
+            </button>
+          </div>
+        ` : ''}
+      </div>
+
+      <textarea class="shelf-item-desc" placeholder="وصف المنتج ومميزاته ومواصفاته..." rows="2" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.8rem; resize:vertical; font-family:inherit;">${escapeHtml(initialDesc)}</textarea>
+
+      <!-- حقول الألوان والمقاسات التلقائية -->
+      <div style="display:flex; gap:6px;">
+        <div style="flex:1;">
+          <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">الألوان (اختياري)</label>
+          <input type="text" class="shelf-item-colors" value="${escapeHtml(initialColors)}" placeholder="مثال: أسود, أبيض, بيج" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.8rem; font-family:inherit;">
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">المقاسات / السعات</label>
+          <input type="text" class="shelf-item-sizes" value="${escapeHtml(initialSizes)}" placeholder="مثال: S, M, L أو 50ml أو 256GB" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.8rem; font-family:inherit;">
+        </div>
+      </div>
+
+      <div style="display:flex; gap:6px;">
+        <div style="flex:1;">
+          <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">السعر (د.ع)</label>
+          <input type="number" class="shelf-item-price" value="${initialPrice}" placeholder="السعر" min="0" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem;">
+        </div>
+        <div style="width:100px;">
+          <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">
+            ${currentStock !== null ? 'الكمية الواردة (+)' : 'الكمية'}
+          </label>
+          <input type="number" class="shelf-item-stock" value="${initialStock}" placeholder="الكمية" min="0" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem;">
+          ${currentStock !== null ? `<span style="font-size:0.7rem; color:var(--text-2); display:block; margin-top:2px; text-align:center;">(الحالي: ${currentStock})</span>` : ''}
+        </div>
+      </div>
+
+      <input type="hidden" class="shelf-item-barcode" value="${escapeHtml(initialBarcode)}">
+
+      <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer; margin-top:4px; padding-top:6px; border-top:1px dashed var(--line);">
+        <input type="checkbox" class="shelf-item-check" checked data-crop="${escapeHtml(item.image || '')}">
+        <span style="font-weight:600;">تأكيد التحديث / الإضافة للمتجر</span>
+      </label>
+    `;
+
+    // مطابقة القسم تلقائياً إن وجد في المتجر
+    const catSelect = card.querySelector(".shelf-item-category");
+    if (catSelect) {
+      if (item.categoryId) {
+        catSelect.value = item.categoryId;
+      } else if (cleanSuggestedCat) {
+        const found = categories.find(c => cleanNameForMatch(c.name) === cleanSuggestedCat || cleanNameForMatch(c.name).includes(cleanSuggestedCat));
+        if (found) catSelect.value = found.id;
+      }
+    }
+
+    // زر (+) السريع لإنشاء قسم جديد
+    const btnQuickAdd = card.querySelector(".btn-quick-add-cat");
+    if (btnQuickAdd) {
+      btnQuickAdd.addEventListener("click", () => {
+        const catName = prompt("اكتب اسم القسم الجديد:");
+        if (catName && catName.trim()) {
+          const newId = fastAddCategory(catName);
+          if (newId) {
+            refreshAllBatchCategorySelects(card, newId);
+          }
+        }
+      });
+    }
+
+    // زر [+ إنشاء واختيار] للقسم المقترح
+    const btnSuggested = card.querySelector(".btn-create-suggested-cat");
+    if (btnSuggested) {
+      btnSuggested.addEventListener("click", () => {
+        const catName = btnSuggested.getAttribute("data-cat-name");
+        const newId = fastAddCategory(catName);
+        if (newId) {
+          refreshAllBatchCategorySelects(card, newId);
+          const chip = card.querySelector(".suggested-cat-chip");
+          if (chip) chip.remove();
+        }
+      });
+    }
+
+    const nameInp = card.querySelector(".shelf-item-name");
+    const googleLink = card.querySelector(".btn-google-search");
+    if (nameInp && googleLink) {
+      nameInp.addEventListener("input", () => {
+        const q = (nameInp.value.trim() || 'product') + ' product white background';
+        googleLink.href = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`;
+      });
+    }
+
+    card.querySelector(".btn-paste-url").addEventListener("click", () => {
+      const url = prompt("ألصق رابط الصورة المباشر هنا:");
+      if (url && url.trim().startsWith("http")) {
+        const box = card.querySelector(".shelf-img-box");
+        box.innerHTML = `<img class="shelf-item-img" src="${escapeHtml(url.trim())}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+        card.querySelector(".shelf-item-check").setAttribute("data-crop", url.trim());
+        card.style.borderColor = "var(--olive-600, #4ade80)";
+      }
+    });
+
+    card.querySelector(".shelf-card-file").addEventListener("change", (ev) => {
+      const f = ev.target.files[0];
+      if (f) {
+        const r = new FileReader();
+        r.onload = (e2) => {
+          const box = card.querySelector(".shelf-img-box");
+          box.innerHTML = `<img class="shelf-item-img" src="${e2.target.result}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+          card.querySelector(".shelf-item-check").setAttribute("data-crop", e2.target.result);
+          card.style.borderColor = "var(--olive-600, #4ade80)";
+        };
+        r.readAsDataURL(f);
+      }
+    });
+
+    card.querySelector(".shelf-item-check").addEventListener("change", updateCounter);
+
+    container.appendChild(card);
+  });
+
+  if (statusText) statusText.textContent = `تم العثور على ${items.length} صنف`;
+  updateCounter();
+
+  if (selectAllChk && !selectAllChk.dataset.wired) {
+    selectAllChk.dataset.wired = "1";
+    selectAllChk.addEventListener("change", (e) => {
+      const chks = container.querySelectorAll(".shelf-item-check");
+      chks.forEach(c => c.checked = e.target.checked);
+      updateCounter();
+    });
+  }
+
+  modal.style.display = "flex";
+  modal.classList.add("open");
+}
+
+/* ---------------------------------------------------------------------- */
+/* 3) مسح الرف بالكاميرا وقص المنتجات                                     */
+/* ---------------------------------------------------------------------- */
+function wireShelfScanner() {
+  const input = document.getElementById("shelfImageInput");
+  const modal = document.getElementById("shelfScanModal");
+  const closeBtn = document.getElementById("closeShelfScanModal");
+  const cancelBtn = document.getElementById("btnCancelShelfScan");
+  const saveBtn = document.getElementById("btnSaveShelfProducts");
+
+  if (!input || !modal || input.dataset.wired) return;
+  input.dataset.wired = "1";
+
+  const closeModal = () => {
+    modal.classList.remove("open");
+    modal.style.display = "none";
+    document.getElementById("shelfDetectedList").innerHTML = "";
+    input.value = "";
+    const invInput = document.getElementById("invoiceImageInput");
+    if (invInput) invInput.value = "";
+    const xlInput = document.getElementById("excelSyncInput");
+    if (xlInput) xlInput.value = "";
+  };
+
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+
+  input.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (!window.StoreAI || typeof window.StoreAI.scanShelf !== "function") {
+      showToast("خدمة مسح الرفوف غير متوفرة في js/ai.js", "error");
+      input.value = "";
+      return;
+    }
+
+    showProcessLoader("مسح وتفكيك الرف", [
+      "جارٍ فحص صورة الرف وتحديد العبوات...",
+      "جارٍ قص وتجهيز صور المنتجات...",
+      "جارٍ مطابقة الأصناف مع الكتالوج..."
+    ]);
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const dataUrl = reader.result;
+          const base64Clean = dataUrl.split(",")[1];
+          const mimeType = file.type || "image/jpeg";
+
+          const aiResult = await window.StoreAI.scanShelf(base64Clean, mimeType);
+          const rawItems = (aiResult && aiResult.products) ? aiResult.products : [];
+
+          if (!rawItems.length) {
+            hideProcessLoader();
+            showToast("لم يتم اكتشاف منتجات واضحة في الصورة.", "error");
+            return;
+          }
+
+          const img = new Image();
+          img.onload = () => {
+            const mappedItems = [];
+            const existingProducts = Store.getAdminProducts();
+
+            rawItems.forEach((item, idx) => {
+              if (!item.box_2d || item.box_2d.length < 4) return;
+              const [ymin, xmin, ymax, xmax] = item.box_2d;
+
+              const sx = Math.max(0, (xmin / 1000) * img.naturalWidth);
+              const sy = Math.max(0, (ymin / 1000) * img.naturalHeight);
+              const sWidth = Math.min(img.naturalWidth - sx, ((xmax - xmin) / 1000) * img.naturalWidth);
+              const sHeight = Math.min(img.naturalHeight - sy, ((ymax - ymin) / 1000) * img.naturalHeight);
+
+              if (sWidth <= 10 || sHeight <= 10) return;
+
+              const canvas = document.createElement("canvas");
+              canvas.width = sWidth;
+              canvas.height = sHeight;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
+              const croppedUrl = canvas.toDataURL("image/jpeg", 0.88);
+
+              const cleanItemName = cleanNameForMatch(item.name);
+              const existing = existingProducts.find(p => {
+                if (p.name && cleanItemName) {
+                  return cleanNameForMatch(p.name) === cleanItemName;
+                }
+                return false;
+              });
+
+              mappedItems.push({
+                name: item.name || `منتج ${idx + 1}`,
+                category: item.category || "",
+                categoryId: existing ? existing.categoryId : "",
+                description: existing ? existing.description : "",
+                colors: existing && existing.colors ? existing.colors.map(c => c.name) : [],
+                sizes: existing && existing.sizes ? existing.sizes : [],
+                price: existing ? existing.price : "",
+                stock: 1,
+                currentStock: existing ? (Number(existing.stock) || 0) : null,
+                image: croppedUrl,
+                existingId: existing ? existing.id : ""
+              });
+            });
+
+            hideProcessLoader();
+            renderBatchReviewCards(mappedItems, "المنتجات المكتشفة على الرف 📸");
+            showToast("تم قص المنتجات بنجاح", "success");
+          };
+          img.src = dataUrl;
+        } catch (err) {
+          hideProcessLoader();
+          console.error(err);
+          showToast(err.message || "حدث خطأ أثناء فحص صورة الرف", "error");
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      hideProcessLoader();
+      console.error(err);
+      showToast("تعذر قراءة ملف الصورة", "error");
+    }
+  });
+
+  // حفظ وتحديث المنتجات وترتيبها الزمني مع جمع المخزون ودمج الخيارات
+  if (saveBtn && !saveBtn.dataset.wired) {
+    saveBtn.dataset.wired = "1";
+    saveBtn.addEventListener("click", async () => {
+      const container = document.getElementById("shelfDetectedList");
+      const cards = container.querySelectorAll(".shelf-item-card");
+      const toProcess = [];
+
+      cards.forEach(card => {
+        const chk = card.querySelector(".shelf-item-check");
+        if (!chk || !chk.checked) return;
+
+        const name = card.querySelector(".shelf-item-name")?.value.trim();
+        const categoryId = card.querySelector(".shelf-item-category")?.value || "";
+        const description = card.querySelector(".shelf-item-desc")?.value.trim() || "";
+        const price = Number(card.querySelector(".shelf-item-price")?.value) || 0;
+        const stock = Number(card.querySelector(".shelf-item-stock")?.value) || 0;
+        const barcode = card.querySelector(".shelf-item-barcode")?.value.trim() || "";
+        const existingId = card.getAttribute("data-existing-id") || "";
+        const imgUrl = chk.getAttribute("data-crop") || "";
+
+        const colorsRaw = card.querySelector(".shelf-item-colors")?.value.trim() || "";
+        const sizesRaw = card.querySelector(".shelf-item-sizes")?.value.trim() || "";
+        const rawColors = colorsRaw ? colorsRaw.split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : [];
+        const rawSizes = sizesRaw ? sizesRaw.split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : [];
+
+        if (name) {
+          toProcess.push({ name, categoryId, description, price, stock, barcode, existingId, imgUrl, rawColors, rawSizes });
+        }
+      });
+
+      if (!toProcess.length) {
+        showToast("لم تحدد أي منتجات للحفظ", "error");
+        return;
+      }
+
+      if (!ensureProductsWritable()) return;
+      if (!(await ensureFullCatalogForBulk())) return;
+
+      showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", [
+        "جارٍ معالجة ورفع صور المنتجات...",
+        "جارٍ مزامنة وتحديث كميات المخزون...",
+        "جارٍ ربط وتحديث قاعدة البيانات..."
+      ]);
+
+      try {
+        let addedCount = 0;
+        let updatedCount = 0;
+        const touchedProducts = [];
+        let allProducts = Store.getProducts();
+
+        const now = Date.now();
+        for (let i = 0; i < toProcess.length; i++) {
+          const item = toProcess[i];
+          let finalImgUrl = item.imgUrl;
+
+          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
+            try {
+              const blob = dataURLtoBlob(item.imgUrl);
+              finalImgUrl = await uploadToImgBB(blob, false);
+            } catch (e) {
+              console.warn("ImgBB upload failed, falling back to dataUrl:", e);
+            }
+          }
+
+          const cleanItemName = cleanNameForMatch(item.name);
+          let existingProduct = item.existingId
+            ? allProducts.find(p => p.id === item.existingId)
+            : allProducts.find(p => (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) || (p.name && cleanNameForMatch(p.name) === cleanItemName));
+
+          const cleanColors = (item.rawColors || []).map((cName) => ({
+            name: cName,
+            hex: getColorHex(cName),
+            image: null
+          }));
+          const cleanSizes = item.rawSizes || [];
+
+          // بناء جدول المخزون الداخلي للكمية الواردة
+          let cleanInventory = {};
+          if (cleanColors.length > 0 || cleanSizes.length > 0) {
+            const rowKeys = cleanColors.length ? cleanColors.map(c => c.name) : [null];
+            const colKeys = cleanSizes.length ? cleanSizes : [null];
+            const totalCombos = rowKeys.length * colKeys.length;
+            const qtyPerCombo = totalCombos > 0 ? Math.max(1, Math.floor(item.stock / totalCombos)) : item.stock;
+
+            rowKeys.forEach(color => {
+              colKeys.forEach(size => {
+                const key = inventoryKeyFor(color, size);
+                cleanInventory[key] = qtyPerCombo;
+              });
+            });
+          }
+
+          const itemTimestamp = now + (toProcess.length - i);
+
+          if (existingProduct) {
+            if (item.price > 0) existingProduct.price = item.price;
+            if (item.categoryId) existingProduct.categoryId = item.categoryId;
+            if (item.description) existingProduct.description = item.description;
+            if (finalImgUrl && !existingProduct.image) existingProduct.image = finalImgUrl;
+
+            // دمج الألوان والمقاسات القديمة مع الجديدة دون تكرار
+            const mergedColors = [...(existingProduct.colors || [])];
+            cleanColors.forEach(nc => {
+              if (!mergedColors.some(oc => oc.name.trim().toLowerCase() === nc.name.trim().toLowerCase())) {
+                mergedColors.push(nc);
+              }
+            });
+
+            const mergedSizes = [...(existingProduct.sizes || [])];
+            cleanSizes.forEach(ns => {
+              if (!mergedSizes.some(os => os.trim().toLowerCase() === ns.trim().toLowerCase())) {
+                mergedSizes.push(ns);
+              }
+            });
+
+            if (mergedColors.length) existingProduct.colors = mergedColors;
+            if (mergedSizes.length) existingProduct.sizes = mergedSizes;
+
+            // جمع الكمية الواردة إلى الرصيد الحالي للمنتج (+)
+            const incomingQty = Number(item.stock) || 0;
+            const currentTotalStock = Number(existingProduct.stock) || 0;
+
+            if (Object.keys(cleanInventory).length > 0) {
+              let mergedInventory = Object.assign({}, existingProduct.inventory || {});
+              Object.keys(cleanInventory).forEach(k => {
+                mergedInventory[k] = (Number(mergedInventory[k]) || 0) + Number(cleanInventory[k]);
+              });
+              existingProduct.inventory = mergedInventory;
+              existingProduct.stock = Object.values(mergedInventory).reduce((sum, n) => sum + (Number(n) || 0), 0);
+            } else {
+              existingProduct.stock = currentTotalStock + incomingQty;
+            }
+
+            existingProduct.updatedAt = itemTimestamp;
+            if (existingProduct.stock > 0) existingProduct.available = true;
+            touchedProducts.push(existingProduct);
+            updatedCount++;
+          } else {
+            const newP = Store.addProduct({
+              name: item.name,
+              description: item.description || "",
+              barcode: item.barcode,
+              sku: item.barcode,
+              price: item.price,
+              oldPrice: 0,
+              stock: item.stock,
+              categoryId: item.categoryId,
+              colors: cleanColors,
+              sizes: cleanSizes,
+              inventory: cleanInventory,
+              image: finalImgUrl,
+              images: [],
+              available: true,
+              featured: false,
+              isNew: true,
+              isOffer: false,
+              createdAt: itemTimestamp,
+              updatedAt: itemTimestamp
+            });
+            if (newP) {
+              newP.createdAt = itemTimestamp;
+              newP.updatedAt = itemTimestamp;
+              touchedProducts.push(newP);
+              addedCount++;
+            }
+          }
+        }
+
+        await Store.saveProducts(Store.getProducts());
+        await syncProductsToAlgolia(touchedProducts);
+
+        hideProcessLoader();
+        renderProductsTable();
+        renderStats();
+        showToast(`تم بنجاح! تمت إضافة (${addedCount}) منتج وتحديث رصيد (${updatedCount}) منتج. 🚀`, "success");
+        closeModal();
+      } catch (err) {
+        hideProcessLoader();
+        console.error(err);
+        showToast("حدث خطأ أثناء حفظ البيانات: " + err.message, "error");
+      }
+    });
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* 4) مسح الفواتير وقوائم المنتجات بالكاميرا (Invoice OCR)                 */
+/* ---------------------------------------------------------------------- */
+function wireInvoiceScanner() {
+  const input = document.getElementById("invoiceImageInput");
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = "1";
+
+  input.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") {
+      showToast("خدمة قراءة الفواتير غير متوفرة في js/ai.js", "error");
+      input.value = "";
+      return;
+    }
+
+    showProcessLoader("معالجة القائمة والمنتجات", [
+      "جارٍ قراءة النصوص وتصنيف الأقسام المقترحة...",
+      "جارٍ استخراج الأسماء الأساسية والمواصفات...",
+      "جارٍ فرز المتغيرات والمقاسات والألوان...",
+      "جارٍ مطابقة الأرصدة الحالية في المتجر..."
+    ]);
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const dataUrl = reader.result;
+          const base64Clean = dataUrl.split(",")[1];
+          const mimeType = file.type || "image/jpeg";
+
+          const result = await window.StoreAI.scanInvoice(base64Clean, mimeType);
+          const rawItems = (result && result.items) ? result.items : [];
+
+          if (!rawItems.length) {
+            hideProcessLoader();
+            showToast("لم يتم العثور على أصناف واضحة في الصورة.", "error");
+            return;
+          }
+
+          const existingProducts = Store.getAdminProducts();
+          const categories = Store.getCategories();
+
+          const mappedItems = rawItems.map(item => {
+            const cleanItemName = cleanNameForMatch(item.name);
+            const existing = existingProducts.find(p => {
+              if (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) return true;
+              if (p.name && cleanItemName) {
+                return cleanNameForMatch(p.name) === cleanItemName;
+              }
+              return false;
+            });
+
+            // مطابقة القسم المقترح من الذكاء الاصطناعي مع الأقسام الموجودة في المتجر
+            let matchedCatId = existing ? existing.categoryId : "";
+            if (!matchedCatId && item.category) {
+              const cleanSuggested = cleanNameForMatch(item.category);
+              const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
+              if (foundCat) matchedCatId = foundCat.id;
+            }
+
+            const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
+            const existingSizes = existing && existing.sizes ? existing.sizes : [];
+
+            return {
+              name: item.name,
+              category: item.category || "",
+              categoryId: matchedCatId,
+              price: item.price || (existing ? existing.price : 0),
+              stock: item.qty || 1,
+              currentStock: existing ? (Number(existing.stock) || 0) : null,
+              barcode: item.barcode || (existing ? (existing.barcode || existing.sku) : ""),
+              description: item.description || (existing ? existing.description : ""),
+              colors: (item.colors && item.colors.length) ? item.colors : existingColors,
+              sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
+              image: item.image || (existing ? existing.image : ""),
+              existingId: existing ? existing.id : ""
+            };
+          });
+
+          hideProcessLoader();
+          renderBatchReviewCards(mappedItems, "مراجعة بضائع الوصل / الفاتورة الورقية 📄");
+          showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
+        } catch (err) {
+          hideProcessLoader();
+          console.error(err);
+          showToast(err.message || "حدث خطأ أثناء قراءة الفاتورة", "error");
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      hideProcessLoader();
+      console.error(err);
+      showToast("تعذر قراءة ملف الفاتورة", "error");
+    }
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* 5) استيراد ملفات الإكسل وعرضها أولاً داخل شاشة المراجعة التفاعلية       */
+/* ---------------------------------------------------------------------- */
 function wireExcelSync() {
   const fileInput = document.getElementById("excelSyncInput") || document.querySelector('input[type="file"][accept=".xlsx, .xls, .csv"]');
-  if (!fileInput) return;
+  if (!fileInput || fileInput.dataset.wired) return;
+  fileInput.dataset.wired = "1";
 
   fileInput.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+
+    showProcessLoader("قراءة ملف الإكسل", [
+      "جارٍ فحص الجداول والأعمدة...",
+      "جارٍ مطابقة الأسماء والباركود والمخزون...",
+      "جارٍ تجهيز شاشة المراجعة..."
+    ]);
 
     try {
       const data = await file.arrayBuffer();
@@ -288,7 +1310,8 @@ function wireExcelSync() {
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
       if (rows.length === 0) {
-        alert("الملف فارغ أو لا يحتوي على بيانات مقروءة.");
+        hideProcessLoader();
+        showToast("الملف فارغ أو لا يحتوي على بيانات صالحة.", "error");
         return;
       }
 
@@ -304,6 +1327,11 @@ function wireExcelSync() {
       const nameKeys = ["اسم المنتج", "الاسم", "المادة", "name"];
       const priceKeys = ["السعر", "سعر البيع", "سعر المفرد", "price"];
       const stockKeys = ["الكمية", "المخزون", "الرصيد", "stock", "qty"];
+      const categoryKeys = ["القسم", "التصنيف", "category"];
+      const descKeys = ["الوصف", "وصف", "description", "desc"];
+      const colorKeys = ["الألوان", "الالوان", "لون", "اللون", "colors", "color"];
+      const sizeKeys = ["المقاسات", "المقاس", "الاحجام", "الحجم", "sizes", "size"];
+      const imageKeys = ["الصورة", "صورة", "رابط الصورة", "image", "img"];
 
       const parseCellNumber = (raw) => {
         if (raw === null || raw === undefined || raw === "") return null;
@@ -317,128 +1345,75 @@ function wireExcelSync() {
         return isFinite(n) ? n : null;
       };
 
-      const validRows = [];
+      const existingProducts = Store.getAdminProducts();
+      const categories = Store.getCategories();
+      const mappedItems = [];
+
       rows.forEach(row => {
         const barcodeVal = getVal(row, barcodeKeys)?.toString().trim();
         const nameVal = getVal(row, nameKeys)?.toString().trim();
         let priceVal = parseCellNumber(getVal(row, priceKeys));
         let stockVal = parseCellNumber(getVal(row, stockKeys));
+        const catVal = getVal(row, categoryKeys)?.toString().trim();
+        const descVal = getVal(row, descKeys)?.toString().trim();
+        const colorsRaw = getVal(row, colorKeys);
+        const sizesRaw = getVal(row, sizeKeys);
+        const imgVal = getVal(row, imageKeys)?.toString().trim();
 
         if (!nameVal && !barcodeVal) return;
-        if (priceVal !== null && priceVal < 0) priceVal = null;
-        if (stockVal !== null) stockVal = Math.max(0, Math.floor(stockVal));
 
-        validRows.push({ barcodeVal, nameVal, priceVal, stockVal });
-      });
-
-      if (validRows.length === 0) {
-        alert("لم يتم العثور على أي صفوف صالحة (يلزم اسم أو باركود) في الملف.");
-        return;
-      }
-
-      const MAX_IMPORT = (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG.maxExcelImportCount) || 1000;
-      if (validRows.length > MAX_IMPORT) {
-        alert(`الملف يحتوي على (${validRows.length}) صف.\nالحد الأقصى المسموح باستيراده دفعة واحدة هو (${MAX_IMPORT}) صف لحماية الحساب.\nيرجى تقسيم الملف أو رفع maxExcelImportCount في config.js.`);
-        return;
-      }
-
-      if (!(await ensureFullCatalogForBulk())) return;
-
-      let products = Store.getProducts();
-      let updatedCount = 0;
-      let addedCount = 0;
-      let zeroedCount = 0;
-      let skippedNewCount = 0;
-      let matrixStockSkipped = 0;
-      const touchedProducts = [];
-
-      validRows.forEach(item => {
-        let existingProduct = products.find(p =>
-          (item.barcodeVal && (p.barcode === item.barcodeVal || p.sku === item.barcodeVal || p.id === item.barcodeVal)) ||
-          (item.nameVal && p.name === item.nameVal)
+        const cleanItemName = cleanNameForMatch(nameVal);
+        const existing = existingProducts.find(p =>
+          (barcodeVal && (p.barcode === barcodeVal || p.sku === barcodeVal || p.id === barcodeVal)) ||
+          (p.name && cleanItemName && cleanNameForMatch(p.name) === cleanItemName)
         );
 
-        if (existingProduct) {
-          if (item.priceVal !== null) existingProduct.price = item.priceVal;
-
-          if (item.stockVal !== null) {
-            if (Store.hasVariantMatrix(existingProduct)) {
-              matrixStockSkipped++;
-            } else {
-              existingProduct.stock = item.stockVal;
-              if (item.stockVal > 0) existingProduct.available = true;
-              else zeroedCount++;
-            }
-          }
-          if (item.barcodeVal && !existingProduct.barcode) {
-            existingProduct.barcode = item.barcodeVal;
-            existingProduct.sku = item.barcodeVal;
-          }
-          touchedProducts.push(existingProduct);
-          updatedCount++;
-        } else {
-          if (!item.nameVal || !(item.priceVal > 0) || !(item.stockVal > 0)) { skippedNewCount++; return; }
-          const newProduct = {
-            id: uid("prd"),
-            name: item.nameVal,
-            barcode: item.barcodeVal || "",
-            sku: item.barcodeVal || "",
-            price: item.priceVal,
-            oldPrice: 0,
-            stock: item.stockVal,
-            categoryId: "",
-            available: true,
-            featured: false,
-            isNew: true,
-            isOffer: false,
-            image: "",
-            images: [],
-            colors: [],
-            sizes: [],
-            inventory: {}
-          };
-          products.push(newProduct);
-          touchedProducts.push(newProduct);
-          addedCount++;
+        let matchedCatId = existing ? existing.categoryId : "";
+        if (!matchedCatId && catVal) {
+          const cleanSuggested = cleanNameForMatch(catVal);
+          const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
+          if (foundCat) matchedCatId = foundCat.id;
         }
+
+        const colorsList = colorsRaw ? String(colorsRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.colors ? existing.colors.map(c => c.name) : []);
+        const sizesList = sizesRaw ? String(sizesRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.sizes ? existing.sizes : []);
+
+        mappedItems.push({
+          name: nameVal || (existing ? existing.name : "صنف بدون اسم"),
+          barcode: barcodeVal || (existing ? (existing.barcode || existing.sku) : ""),
+          price: priceVal !== null ? priceVal : (existing ? existing.price : 0),
+          stock: stockVal !== null ? Math.max(0, Math.floor(stockVal)) : 1,
+          currentStock: existing ? (Number(existing.stock) || 0) : null,
+          category: catVal || "",
+          categoryId: matchedCatId,
+          description: descVal || (existing ? existing.description : ""),
+          colors: colorsList,
+          sizes: sizesList,
+          image: imgVal || (existing ? existing.image : ""),
+          existingId: existing ? existing.id : ""
+        });
       });
 
-      if (!touchedProducts.length) {
-        alert("لم يتم تحديث أي منتج. الصفوف الجديدة تحتاج اسماً وسعراً أكبر من صفر وكمية أكبر من صفر.");
+      hideProcessLoader();
+
+      if (!mappedItems.length) {
+        showToast("لم يتم العثور على أي صفوف تطابق أعمدة الاسم أو الباركود.", "error");
         return;
       }
 
-      const saved = await Store.saveProducts(products);
-      if (saved === false) {
-        alert("تعذّر حفظ التغييرات على الخادم. حدّث الصفحة وأعد المحاولة.");
-        return;
-      }
-      await syncProductsToAlgolia(touchedProducts);
-
-      let report = `تمت العملية بنجاح!\n- تم تحديث: ${updatedCount} منتج\n- تمت إضافة: ${addedCount} منتج جديد`;
-      if (zeroedCount) report += `\n- أُصفرت كميتها (غير متوفرة الآن): ${zeroedCount}`;
-      if (skippedNewCount) report += `\n- صفوف جديدة تم تخطيها (بلا سعر/كمية صالحة): ${skippedNewCount}`;
-      if (matrixStockSkipped) report += `\n- منتجات بألوان/مقاسات لم تُحدَّث كميتها (عدّلها من نافذة المنتج): ${matrixStockSkipped}`;
-      alert(report);
-
-      if (typeof renderProductsTable === "function") {
-        renderProductsTable();
-      }
-      renderStats();
-
+      renderBatchReviewCards(mappedItems, "مراجعة وتأكيد بيانات ملف الإكسل 📊");
+      showToast(`تم استيراد ${mappedItems.length} صنف للمعاينة بنجاح`, "success");
     } catch (error) {
+      hideProcessLoader();
       console.error("Excel import error:", error);
-      alert("حدث خطأ أثناء قراءة الملف. تأكد من أن الملف بصيغة Excel صالحة وأن الأعمدة مطابقة.");
-    } finally {
-      fileInput.value = "";
+      showToast("حدث خطأ أثناء قراءة ملف الإكسل.", "error");
     }
   });
 }
 
 /* ---------------------------------------------------------------------- */
-/* رفع الصور ومعالجتها الذكية بدقة عالية عبر ImageKit CDN                 */
+/* رفع ومعالجة الصور عبر ImgBB و ImageKit CDN                             */
 /* ---------------------------------------------------------------------- */
-
 async function uploadToImgBB(file, isBanner = false) {
   if (!file) throw new Error("لم يتم اختيار ملف");
 
@@ -447,20 +1422,14 @@ async function uploadToImgBB(file, isBanner = false) {
 
   if (file.size > MAX_SIZE_BYTES) {
     const currentMB = (file.size / (1024 * 1024)).toFixed(1);
-    const errorMsg = `حجم الصورة كبير جداً (${currentMB}MB)! الحد الأقصى المسموح به هو ${MAX_SIZE_MB}MB.`;
-    showToast(errorMsg, "error");
-    throw new Error(errorMsg);
-  }
-
-  if (!file.type || !file.type.startsWith("image/")) {
-    const errorMsg = "الملف المختار ليس صورة صالحة!";
+    const errorMsg = `حجم الصورة كبير جداً (${currentMB}MB)! الحد الأقصى هو ${MAX_SIZE_MB}MB.`;
     showToast(errorMsg, "error");
     throw new Error(errorMsg);
   }
 
   const apiKey = (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG.imgbbApiKey || "").trim();
   if (!apiKey || apiKey === "YOUR_IMGBB_KEY") {
-    throw new Error("لم يتم إعداد مفتاح ImgBB بعد. أضِف imgbbApiKey في js/config.js لتفعيل رفع الصور.");
+    throw new Error("لم يتم ضبط مفتاح imgbbApiKey في js/config.js.");
   }
 
   const formData = new FormData();
@@ -484,21 +1453,15 @@ async function uploadToImgBB(file, isBanner = false) {
   }
 
   const match = rawUrl.match(/^https?:\/\/i\.ibb\.co\/(.+)$/);
-  if (!match) {
-    return rawUrl;
-  }
+  if (!match) return rawUrl;
 
-  const transform = isBanner
-    ? "tr:w-1400,q-90,f-webp"
-    : "tr:w-900,q-85,f-webp";
-
+  const transform = isBanner ? "tr:w-1400,q-90,f-webp" : "tr:w-900,q-85,f-webp";
   return imageKitEndpoint + "/" + transform + "/" + match[1];
 }
 
 /* ---------------------------------------------------------------------- */
-/* التنقّل بين الأقسام وإدارة القائمة الجانبية                            */
+/* التنقل والقائمة الجانبية                                              */
 /* ---------------------------------------------------------------------- */
-
 function wireSidebarNav() {
   const buttons = document.querySelectorAll(".admin-nav button[data-panel]");
   buttons.forEach(function (btn) {
@@ -519,7 +1482,6 @@ function wireSidebarNav() {
 window.toggleAdminSidebar = function() {
   const sidebar = document.querySelector('.admin-sidebar');
   const overlay = document.querySelector('.sidebar-overlay');
-  
   if (sidebar) sidebar.classList.toggle('open');
   if (overlay) overlay.classList.toggle('active');
 };
@@ -527,7 +1489,6 @@ window.toggleAdminSidebar = function() {
 /* ---------------------------------------------------------------------- */
 /* لوحة الإحصائيات                                                       */
 /* ---------------------------------------------------------------------- */
-
 function renderStats() {
   renderOutOfStock();
   const products = Store.getAdminProducts();
@@ -546,11 +1507,8 @@ function renderStats() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* جدول المنتجات                                                        */
+/* جدول المنتجات (مع فرز الأحدث أولاً دائماً)                             */
 /* ---------------------------------------------------------------------- */
-
-/* عدد الصفوف المرسومة دفعة واحدة. كان الجدول يرسم كل المنتجات (مئات/آلاف الصفوف
-   مع صورها) فيثقل اللوحة والقائمة الجانبية. الآن يُرسم جزء صغير + زر "عرض المزيد". */
 const ADMIN_PRODUCTS_PAGE_SIZE = 40;
 let adminProductsShown = ADMIN_PRODUCTS_PAGE_SIZE;
 let adminProductsLastQuery = "";
@@ -599,8 +1557,6 @@ function adminProductRowHtml(p) {
   );
 }
 
-// ============ قسم: المنتجات التي نفذت من المتجر ============
-// يعتمد على Store.isProductAvailable نفسها، فيطابق تماماً ما يراه الزبون كـ "غير متوفر"
 function oosReasonOf(p) {
   if (p.available === false) return "hidden";
   return "stock";
@@ -669,7 +1625,6 @@ function renderProductsTable() {
   if (!tbody) return;
 
   const query = ((document.getElementById("adminProductSearch") || {}).value || "").trim().toLowerCase();
-  // تغيّر البحث → ارجع لأول صفحة. (الحفظ/الحذف يبقيان على عدد الصفوف المعروضة)
   if (query !== adminProductsLastQuery) {
     adminProductsLastQuery = query;
     adminProductsShown = ADMIN_PRODUCTS_PAGE_SIZE;
@@ -677,6 +1632,13 @@ function renderProductsTable() {
 
   let products = Store.getAdminProducts().filter(Boolean);
   if (query) products = products.filter(function (p) { return adminProductMatches(p, query); });
+
+  // فرز المنتجات تنازلياً ليظهر الأحدث إضافتاً أو تعديلاً أولاً دائماً
+  products.sort((a, b) => {
+    const timeA = Number(a.createdAt || a.updatedAt || 0);
+    const timeB = Number(b.createdAt || b.updatedAt || 0);
+    return timeB - timeA;
+  });
 
   const total = products.length;
   if (!total) {
@@ -694,7 +1656,6 @@ function renderProductsTable() {
   tbody.innerHTML = html;
 }
 
-// مستمع واحد للجدول كله (بدل onclick داخل كل صف) + بحث مؤجَّل لتجنب إعادة الرسم مع كل حرف
 function wireProductsTableEvents() {
   const tbody = document.getElementById("productsTableBody");
   if (tbody && !tbody.dataset.wired) {
@@ -730,7 +1691,7 @@ async function deleteProductConfirm(id) {
     if (!ensureProductsWritable()) return;
     const ok = await Store.deleteProduct(id);
     if (ok === false) {
-      showToast("تعذّر حذف المنتج من الخادم. حدّث الصفحة وأعد المحاولة.", "error");
+      showToast("تعذّر حذف المنتج من الخادم.", "error");
       renderProductsTable();
       return;
     }
@@ -750,9 +1711,8 @@ function populateCategorySelect() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* الألوان + المقاسات + المخزون لكل تركيبة                                 */
+/* إدارة الألوان والمقاسات والمودال                                       */
 /* ---------------------------------------------------------------------- */
-
 function currentSizesFromInput() {
   const input = document.getElementById("productSizes");
   if (!input) return [];
@@ -769,17 +1729,14 @@ function renderColorsList() {
     list.innerHTML = pendingColors.map(function (c, idx) {
       return (
         '<div class="color-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:15px;background:var(--olive-50);padding:15px;border-radius:8px;border:1px solid var(--line);margin-bottom:10px;">' +
-          
           '<div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:5px;">' +
             '<label style="font-size:0.8rem;color:var(--ink-400);">اسم اللون</label>' +
             '<input type="text" placeholder="مثال: أسود" value="' + escapeHtml(c.name || "") + '" data-color-idx="' + idx + '" class="color-name-input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:#fff;">' +
           '</div>' +
-          
           '<div style="display:flex;flex-direction:column;gap:5px;align-items:center;">' +
             '<label style="font-size:0.8rem;color:var(--ink-400);">الدرجة</label>' +
-            '<input type="color" value="' + escapeHtml(/^#[0-9a-fA-F]{6}$/.test(c.hex || "") ? c.hex : "#7c9a4c") + '" data-color-idx="' + idx + '" class="color-hex-input" style="width:38px;height:38px;padding:0;border:none;cursor:border-radius:50%;">' +
+            '<input type="color" value="' + escapeHtml(/^#[0-9a-fA-F]{6}$/.test(c.hex || "") ? c.hex : "#7c9a4c") + '" data-color-idx="' + idx + '" class="color-hex-input" style="width:38px;height:38px;padding:0;border:none;cursor:pointer;border-radius:50%;">' +
           '</div>' +
-          
           '<div class="image-upload" style="margin:0;display:flex;flex-direction:column;gap:5px;min-width:120px;">' +
             '<label style="font-size:0.8rem;color:var(--ink-400);">صورة اللون (اختياري)</label>' +
             '<div style="display:flex;align-items:center;gap:10px;">' +
@@ -789,11 +1746,9 @@ function renderColorsList() {
               '<input type="file" accept="image/*" class="color-image-input" data-color-idx="' + idx + '" style="width:90px;font-size:0.8rem;">' +
             '</div>' +
           '</div>' +
-          
           '<div style="display:flex;align-items:flex-end;height:100%;padding-bottom:2px;">' +
             '<button type="button" class="btn-icon btn-sm" style="color:var(--danger);background:var(--error-bg);border-radius:6px;width:38px;height:38px;" title="حذف اللون" onclick="removeColorRow(' + idx + ')">' + iconSvg("trash") + '</button>' +
           '</div>' +
-          
         '</div>'
       );
     }).join("");
@@ -806,13 +1761,13 @@ function renderColorsList() {
       const newName = this.value;
 
       if (oldName && oldName !== newName) {
-          Object.keys(pendingInventory).forEach(function(key) {
-              if (key.startsWith(oldName + "||")) {
-                  const newKey = key.replace(oldName + "||", newName + "||");
-                  pendingInventory[newKey] = pendingInventory[key];
-                  delete pendingInventory[key];
-              }
-          });
+        Object.keys(pendingInventory).forEach(function(key) {
+          if (key.startsWith(oldName + "||")) {
+            const newKey = key.replace(oldName + "||", newName + "||");
+            pendingInventory[newKey] = pendingInventory[key];
+            delete pendingInventory[key];
+          }
+        });
       }
 
       pendingColors[idx].name = newName;
@@ -964,6 +1919,50 @@ function wireProductModal() {
   if (sizesInput) {
     sizesInput.addEventListener("input", renderInventoryGrid);
   }
+
+  // تفعيل زر التوليد السريع للوصف
+  const btnAiGenDesc = document.getElementById("btnAiGenDesc");
+  if (btnAiGenDesc && !btnAiGenDesc.dataset.wired) {
+    btnAiGenDesc.dataset.wired = "true";
+    btnAiGenDesc.addEventListener("click", async () => {
+      const nameInput = document.getElementById("productName");
+      const descInput = document.getElementById("productDescription");
+      const catSelect = document.getElementById("productCategorySelect");
+
+      const name = nameInput ? nameInput.value.trim() : "";
+      if (!name) {
+        showToast("يرجى كتابة اسم المنتج أولاً", "error");
+        if (nameInput) nameInput.focus();
+        return;
+      }
+
+      const catText = catSelect && catSelect.selectedIndex >= 0 && catSelect.options[catSelect.selectedIndex]
+        ? catSelect.options[catSelect.selectedIndex].text
+        : "";
+      const originalText = btnAiGenDesc.innerHTML;
+
+      btnAiGenDesc.disabled = true;
+      btnAiGenDesc.innerHTML = "جاري التوليد... ⏳";
+
+      try {
+        if (!window.StoreAI || typeof window.StoreAI.generateDescription !== "function") {
+          throw new Error("ملف js/ai.js غير محمل أو غير معرف");
+        }
+        const generated = await window.StoreAI.generateDescription(name, catText);
+        if (descInput) {
+          descInput.value = generated;
+          descInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        showToast("تم توليد الوصف بنجاح ✨", "success");
+      } catch (err) {
+        console.error(err);
+        showToast(err.message || "تعذر توليد الوصف", "error");
+      } finally {
+        btnAiGenDesc.disabled = false;
+        btnAiGenDesc.innerHTML = originalText;
+      }
+    });
+  }
 }
 
 window.removeExtraImage = function(index) {
@@ -996,7 +1995,6 @@ function openProductModal(productId) {
   form.reset();
 
   const preview = document.getElementById("productImagePreview");
-  
   const extraImagesInput = document.getElementById("productExtraImagesInput");
   const extraImagesPreview = document.getElementById("extraImagesPreview");
   if (extraImagesInput) extraImagesInput.value = "";
@@ -1147,8 +2145,13 @@ async function saveProductForm(e) {
     sizes: cleanSizes,
     inventory: cleanInventory,
     image: pendingProductImage,
-    images: extraImagesUrls
+    images: extraImagesUrls,
+    updatedAt: Date.now()
   };
+
+  if (!editingProductId) {
+    data.createdAt = Date.now();
+  }
 
   if (!data.name || !data.categoryId) {
     showToast("يرجى تعبئة اسم المنتج واختيار القسم", "error");
@@ -1168,7 +2171,7 @@ async function saveProductForm(e) {
 
   const persisted = await Store.whenProductsSaved();
   if (persisted === false) {
-    showToast("لم يُحفظ المنتج على الخادم (تحقق من الاتصال وصلاحيات Firebase). النافذة مفتوحة لإعادة المحاولة.", "error");
+    showToast("لم يُحفظ المنتج على الخادم. النافذة مفتوحة لإعادة المحاولة.", "error");
     return;
   }
   showToast(editingProductId ? "تم تحديث المنتج" : "تمت إضافة المنتج", "success");
@@ -1182,6 +2185,9 @@ async function saveProductForm(e) {
   renderStats();
 }
 
+/* ---------------------------------------------------------------------- */
+/* جداول الأقسام والإعلانات والطلبات والإعدادات                            */
+/* ---------------------------------------------------------------------- */
 function renderCategoriesTable() {
   const tbody = document.getElementById("categoriesTableBody");
   if (!tbody) return;
@@ -1516,7 +2522,6 @@ window.changeOrderStatus = async function(orderId, selectElement) {
     if (!ensureProductsWritable()) { selectElement.value = previousStatus; return; }
 
     showToast("جاري التحديث وخصم الكميات...");
-    // نجلب منتجات هذا الطلب فقط، طازجة من الخادم (مخزونها الفعلي الآن)، بدل الاعتماد على كتالوج محلي كامل
     const wantedIds = Array.from(new Set((order.items || []).map(function (it) { return String(it.productId); })));
     const fetched = await Promise.all(wantedIds.map(function (pid) { return Store.loadProductFresh(pid).catch(function () { return null; }); }));
     const byId = new Map();
@@ -1544,14 +2549,13 @@ window.changeOrderStatus = async function(orderId, selectElement) {
     });
 
     if (touched.size > 0) {
-      // عقدة لكل منتج متغيّر (ws_products/{id} + سجل الفهرس) بدل رفع الكتالوج
       const results = await Promise.all(Array.from(touched.values()).map(function (p) {
         const patch = { stock: p.stock };
         if (p.inventory) patch.inventory = p.inventory;
         return Store.updateProduct(p.id, patch);
       }));
       if (results.some(function (ok) { return ok === false; })) {
-        showToast("تعذّر حفظ خصم المخزون على الخادم. لم يتغيّر الطلب. حدّث الصفحة وأعد المحاولة.", "error");
+        showToast("تعذّر حفظ خصم المخزون على الخادم.", "error");
         selectElement.value = previousStatus;
         return;
       }
@@ -1560,9 +2564,9 @@ window.changeOrderStatus = async function(orderId, selectElement) {
 
     const saved = await updateOrderInFirebase(order.id, { status: "prepared", stockDeducted: true });
     if (!saved) {
-      showToast("تم خصم المخزون لكن تعذّر تحديث حالة الطلب على الخادم. حدّث الصفحة وتحقق من الطلب.", "error");
+      showToast("تم خصم المخزون لكن تعذّر تحديث حالة الطلب على الخادم.", "error");
     } else if (notDeducted.length) {
-      showToast("تم التجهيز، لكن لم تُخصم كمية: " + notDeducted.join("، ") + " (المخزون غير كافٍ أو المنتج محذوف).", "error");
+      showToast("تم التجهيز، لكن لم تُخصم كمية: " + notDeducted.join("، ") + " (المخزون غير كافٍ).", "error");
     } else {
       showToast("تم تجهيز الطلب وخصم المخزون بنجاح!", "success");
     }
