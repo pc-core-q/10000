@@ -131,3 +131,4 @@ ${categoriesContext}
 })();
 
 window.StoreAI = StoreAI;
+
