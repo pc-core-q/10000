@@ -90,7 +90,7 @@ const STORE_CONFIG = {
 
 // 3.7) الذكاء الاصطناعي (Gemini)
 // الذكاء الاصطناعي (المعمارية الهجينة)
- geminiApiKey: "AQ.Ab8RN6KCqaTXmf0c6BzD0dr7pd0rY8sZyQi9YSpzKeUhJ3XOcw", // للصور ومسح الرفوف
+ geminiApiKey: "AQ.Ab8RN6Jku9vEG4_f4iHuszFby7qiaACsp3R7pr0MiSsa89vO3Q", // للصور ومسح الرفوف
   groqApiKey: "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",  // لتوليد النصوص والأوامر اللحظية
 
   /* ======================================================================
