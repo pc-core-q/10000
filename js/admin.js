@@ -872,13 +872,13 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 }
 
 /* ---------------------------------------------------------------------- */
-/* معالجة ملفات الإكسل مباشرة عبر الذكاء الاصطناعي (AI Direct CSV Processing)*/
+/* معالجة ملفات الإكسل مباشرة عبر الذكاء الاصطناعي مع استخراج الروابط      */
 /* ---------------------------------------------------------------------- */
 async function handleExcelFileWithAI(file) {
   showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
-    "جارٍ قراءة وتفريغ جدول الإكسل...",
+    "جارٍ قراءة وتفريغ جدول الإكسل والروابط...",
     "جارٍ إرسال البيانات مباشرة إلى الذكاء الاصطناعي...",
-    "جارٍ استخراج الأصناف والأسعار والمخزون بذكاء...",
+    "جارٍ استنتاج الأقسام واستخراج الأسماء باللغتين...",
     "جارٍ تجهيز شاشة المراجعة..."
   ]);
 
@@ -887,7 +887,18 @@ async function handleExcelFileWithAI(file) {
     const workbook = XLSX.read(data);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
-    // تحويل الجدول إلى نص CSV مباشر متكامل
+    // فحص جميع الخلايا واستخراج الروابط التشعبية المضمنة (Hyperlinks) حتى لا تضيع روابط الصور
+    Object.keys(sheet).forEach(cellRef => {
+      if (cellRef.startsWith("!")) return;
+      const cell = sheet[cellRef];
+      if (cell && cell.l && cell.l.Target) {
+        const url = cell.l.Target;
+        cell.v = `${cell.v || ""} [URL: ${url}]`;
+        if (cell.w) cell.w = `${cell.w} [URL: ${url}]`;
+      }
+    });
+
+    // تحويل الجدول إلى نص CSV متكامل
     const csvText = XLSX.utils.sheet_to_csv(sheet);
 
     if (!csvText || !csvText.trim()) {
@@ -896,11 +907,11 @@ async function handleExcelFileWithAI(file) {
       return;
     }
 
-    // تحويل النص إلى Base64 مع دعم كامل لحروف اللغة العربية
-    const base64Data = btoa(unescape(encodeURIComponent(csvText)));
+    // جلب أقسام المتجر الحالية لتمريرها للذكاء الاصطناعي للاختيار منها تلقائياً
+    const storeCategories = Store.getCategories().map(c => c.name);
 
-    // إرسال الملف مباشرة كنص إلى Gemini
-    const result = await window.StoreAI.scanInvoice(base64Data, "text/plain");
+    // إرسال النص مباشرة إلى Gemini مع قائمة الأقسام
+    const result = await window.StoreAI.scanInvoice(csvText, "text/csv", storeCategories);
     const rawItems = (result && result.items) ? result.items : [];
 
     if (!rawItems.length) {
@@ -950,7 +961,7 @@ function wireSmartMediaScanner() {
     cancelBtn.addEventListener("click", closeModal);
   }
 
-  // أ) معالجة "رفع صورة" (كاميرا أو معرض: رف بضائع، وصل ورقي، أو سكرين شوت)
+  // أ) معالجة "رفع صورة" (كاميرا أو معرض)
   if (imgInput && !imgInput.dataset.wired) {
     imgInput.dataset.wired = "1";
     imgInput.addEventListener("change", async (e) => {
@@ -964,10 +975,9 @@ function wireSmartMediaScanner() {
       }
 
       showProcessLoader("معالجة الصورة بالذكاء الاصطناعي", [
-        "جارٍ قراءة تفاصيل الصورة (رف / وصل / سكرين شوت)...",
-        "جارٍ استخراج الأسماء التجارية النظيفة والمواصفات...",
-        "جارٍ مطابقة الأقسام والأسعار مع المتجر...",
-        "جارٍ تجهيز شاشة المراجعة..."
+        "جارٍ قراءة تفاصيل الصورة بصرياً...",
+        "جارٍ استخراج الأسماء التجارية باللغتين والمواصفات والروابط...",
+        "جارٍ مطابقة الأقسام وتجهيز شاشة المراجعة..."
       ]);
 
       try {
@@ -977,8 +987,9 @@ function wireSmartMediaScanner() {
             const dataUrl = reader.result;
             const base64Clean = dataUrl.split(",")[1];
             const mimeType = file.type || "image/jpeg";
+            const storeCategories = Store.getCategories().map(c => c.name);
 
-            const result = await window.StoreAI.scanInvoice(base64Clean, mimeType);
+            const result = await window.StoreAI.scanInvoice(base64Clean, mimeType, storeCategories);
             const rawItems = (result && result.items) ? result.items : [];
 
             if (!rawItems.length) {
@@ -1034,9 +1045,9 @@ function wireSmartMediaScanner() {
         }
 
         showProcessLoader("قراءة وتحليل ملف الفاتورة PDF", [
-          "جارٍ تفريغ نصوص وجداول الفاتورة الإلكترونية...",
-          "جارٍ استخراج قوائم السلع والأسعار والكميات...",
-          "جارٍ مطابقة الأصناف مع الكتالوج الحالي...",
+          "جارٍ تفريغ نصوص وجداول وروابط الفاتورة الإلكترونية...",
+          "جارٍ استخراج الأسماء باللغتين والمواصفات والأسعار...",
+          "جارٍ مطابقة الأقسام من سياق المنتجات بالذكاء الاصطناعي...",
           "جارٍ تجهيز شاشة المراجعة..."
         ]);
 
@@ -1046,8 +1057,9 @@ function wireSmartMediaScanner() {
             try {
               const dataUrl = reader.result;
               const base64Clean = dataUrl.split(",")[1];
+              const storeCategories = Store.getCategories().map(c => c.name);
 
-              const result = await window.StoreAI.scanInvoice(base64Clean, "application/pdf");
+              const result = await window.StoreAI.scanInvoice(base64Clean, "application/pdf", storeCategories);
               const rawItems = (result && result.items) ? result.items : [];
 
               if (!rawItems.length) {
@@ -1264,7 +1276,7 @@ function wireSmartMediaScanner() {
   }
 }
 
-// دالة توحيد المطابقة وفتح شاشة المراجعة
+// دالة توحيد المطابقة وفتح شاشة المراجعة (مع تنقية وتثبيت روابط الصور ومطابقة الأقسام)
 function processAndOpenBatchReview(rawItems, modalTitle) {
   const existingProducts = Store.getAdminProducts();
   const categories = Store.getCategories();
@@ -1282,12 +1294,27 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
     let matchedCatId = existing ? existing.categoryId : "";
     if (!matchedCatId && item.category) {
       const cleanSuggested = cleanNameForMatch(item.category);
-      const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
+      const foundCat = categories.find(c => {
+        const cleanCatName = cleanNameForMatch(c.name);
+        return cleanCatName === cleanSuggested || 
+               cleanCatName.includes(cleanSuggested) || 
+               cleanSuggested.includes(cleanCatName);
+      });
       if (foundCat) matchedCatId = foundCat.id;
     }
 
     const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
     const existingSizes = existing && existing.sizes ? existing.sizes : [];
+
+    // تنقية وتثبيت رابط الصورة
+    let cleanImageUrl = (item.image || "").trim();
+    if (cleanImageUrl) {
+      const urlMatch = cleanImageUrl.match(/https?:\/\/[^\s"'<>]+/);
+      cleanImageUrl = urlMatch ? urlMatch[0] : (cleanImageUrl.startsWith("http") ? cleanImageUrl : "");
+    }
+    if (!cleanImageUrl && existing) {
+      cleanImageUrl = existing.image || "";
+    }
 
     return {
       name: item.name,
@@ -1300,7 +1327,7 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
       description: item.description || (existing ? existing.description : ""),
       colors: (item.colors && item.colors.length) ? item.colors : existingColors,
       sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
-      image: item.image || (existing ? existing.image : ""),
+      image: cleanImageUrl,
       existingId: existing ? existing.id : ""
     };
   });
