@@ -3,9 +3,10 @@
    منطق لوحة تحكم الأدمن بالكامل (admin.html). 
    تم التحديث: 
    1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
-   2) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
-   3) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
-   4) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
+   2) خياران لمسح الوصل: كاميرا مباشرة أو رفع سكرين شوت من الاستوديو.
+   3) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
+   4) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
+   5) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -894,6 +895,10 @@ function wireShelfScanner() {
     input.value = "";
     const invInput = document.getElementById("invoiceImageInput");
     if (invInput) invInput.value = "";
+    const invCam = document.getElementById("invoiceCameraInput");
+    if (invCam) invCam.value = "";
+    const invGal = document.getElementById("invoiceGalleryInput");
+    if (invGal) invGal.value = "";
     const xlInput = document.getElementById("excelSyncInput");
     if (xlInput) xlInput.value = "";
   };
@@ -1186,102 +1191,114 @@ function wireShelfScanner() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 4) مسح الفواتير وقوائم المنتجات بالكاميرا (Invoice OCR)                 */
+/* 4) مسح الفواتير وقوائم المنتجات (كاميرا مباشرة أو رفع سكرين شوت)        */
 /* ---------------------------------------------------------------------- */
 function wireInvoiceScanner() {
-  const input = document.getElementById("invoiceImageInput");
-  if (!input || input.dataset.wired) return;
-  input.dataset.wired = "1";
+  const inputs = [
+    document.getElementById("invoiceImageInput"),
+    document.getElementById("invoiceCameraInput"),
+    document.getElementById("invoiceGalleryInput")
+  ].filter(Boolean);
 
-  input.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  if (!inputs.length) return;
 
-    if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") {
-      showToast("خدمة قراءة الفواتير غير متوفرة في js/ai.js", "error");
-      input.value = "";
-      return;
-    }
+  inputs.forEach(input => {
+    if (input.dataset.wired) return;
+    input.dataset.wired = "1";
 
-    showProcessLoader("معالجة القائمة والمنتجات", [
-      "جارٍ قراءة النصوص وتصنيف الأقسام المقترحة...",
-      "جارٍ استخراج الأسماء الأساسية والمواصفات...",
-      "جارٍ فرز المتغيرات والمقاسات والألوان...",
-      "جارٍ مطابقة الأرصدة الحالية في المتجر..."
-    ]);
+    input.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
 
-    try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const dataUrl = reader.result;
-          const base64Clean = dataUrl.split(",")[1];
-          const mimeType = file.type || "image/jpeg";
+      if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") {
+        showToast("خدمة قراءة الفواتير غير متوفرة في js/ai.js", "error");
+        input.value = "";
+        return;
+      }
 
-          const result = await window.StoreAI.scanInvoice(base64Clean, mimeType);
-          const rawItems = (result && result.items) ? result.items : [];
+      showProcessLoader("معالجة القائمة والمنتجات", [
+        "جارٍ قراءة النصوص وتصنيف الأقسام المقترحة...",
+        "جارٍ استخراج الأسماء الأساسية والمواصفات...",
+        "جارٍ فرز المتغيرات والمقاسات والألوان...",
+        "جارٍ مطابقة الأرصدة الحالية في المتجر..."
+      ]);
 
-          if (!rawItems.length) {
-            hideProcessLoader();
-            showToast("لم يتم العثور على أصناف واضحة في الصورة.", "error");
-            return;
-          }
+      try {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const dataUrl = reader.result;
+            const base64Clean = dataUrl.split(",")[1];
+            const mimeType = file.type || "image/jpeg";
 
-          const existingProducts = Store.getAdminProducts();
-          const categories = Store.getCategories();
+            const result = await window.StoreAI.scanInvoice(base64Clean, mimeType);
+            const rawItems = (result && result.items) ? result.items : [];
 
-          const mappedItems = rawItems.map(item => {
-            const cleanItemName = cleanNameForMatch(item.name);
-            const existing = existingProducts.find(p => {
-              if (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) return true;
-              if (p.name && cleanItemName) {
-                return cleanNameForMatch(p.name) === cleanItemName;
-              }
-              return false;
-            });
-
-            // مطابقة القسم المقترح من الذكاء الاصطناعي مع الأقسام الموجودة في المتجر
-            let matchedCatId = existing ? existing.categoryId : "";
-            if (!matchedCatId && item.category) {
-              const cleanSuggested = cleanNameForMatch(item.category);
-              const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
-              if (foundCat) matchedCatId = foundCat.id;
+            if (!rawItems.length) {
+              hideProcessLoader();
+              showToast("لم يتم العثور على أصناف واضحة في الصورة.", "error");
+              return;
             }
 
-            const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
-            const existingSizes = existing && existing.sizes ? existing.sizes : [];
+            const existingProducts = Store.getAdminProducts();
+            const categories = Store.getCategories();
 
-            return {
-              name: item.name,
-              category: item.category || "",
-              categoryId: matchedCatId,
-              price: item.price || (existing ? existing.price : 0),
-              stock: item.qty || 1,
-              currentStock: existing ? (Number(existing.stock) || 0) : null,
-              barcode: item.barcode || (existing ? (existing.barcode || existing.sku) : ""),
-              description: item.description || (existing ? existing.description : ""),
-              colors: (item.colors && item.colors.length) ? item.colors : existingColors,
-              sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
-              image: item.image || (existing ? existing.image : ""),
-              existingId: existing ? existing.id : ""
-            };
-          });
+            const mappedItems = rawItems.map(item => {
+              const cleanItemName = cleanNameForMatch(item.name);
+              const existing = existingProducts.find(p => {
+                if (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) return true;
+                if (p.name && cleanItemName) {
+                  return cleanNameForMatch(p.name) === cleanItemName;
+                }
+                return false;
+              });
 
-          hideProcessLoader();
-          renderBatchReviewCards(mappedItems, "مراجعة بضائع الوصل / الفاتورة الورقية 📄");
-          showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
-        } catch (err) {
-          hideProcessLoader();
-          console.error(err);
-          showToast(err.message || "حدث خطأ أثناء قراءة الفاتورة", "error");
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      hideProcessLoader();
-      console.error(err);
-      showToast("تعذر قراءة ملف الفاتورة", "error");
-    }
+              // مطابقة القسم المقترح من الذكاء الاصطناعي مع الأقسام الموجودة في المتجر
+              let matchedCatId = existing ? existing.categoryId : "";
+              if (!matchedCatId && item.category) {
+                const cleanSuggested = cleanNameForMatch(item.category);
+                const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
+                if (foundCat) matchedCatId = foundCat.id;
+              }
+
+              const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
+              const existingSizes = existing && existing.sizes ? existing.sizes : [];
+
+              return {
+                name: item.name,
+                category: item.category || "",
+                categoryId: matchedCatId,
+                price: item.price || (existing ? existing.price : 0),
+                stock: item.qty || 1,
+                currentStock: existing ? (Number(existing.stock) || 0) : null,
+                barcode: item.barcode || (existing ? (existing.barcode || existing.sku) : ""),
+                description: item.description || (existing ? existing.description : ""),
+                colors: (item.colors && item.colors.length) ? item.colors : existingColors,
+                sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
+                image: item.image || (existing ? existing.image : ""),
+                existingId: existing ? existing.id : ""
+              };
+            });
+
+            hideProcessLoader();
+            renderBatchReviewCards(mappedItems, "مراجعة بضائع الوصل / الفاتورة الورقية 📄");
+            showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
+          } catch (err) {
+            hideProcessLoader();
+            console.error(err);
+            showToast(err.message || "حدث خطأ أثناء قراءة الفاتورة", "error");
+          } finally {
+            input.value = "";
+          }
+        };
+        reader.readAsDataURL(file);
+      } catch (err) {
+        hideProcessLoader();
+        console.error(err);
+        showToast("تعذر قراءة ملف الفاتورة", "error");
+        input.value = "";
+      }
+    });
   });
 }
 
@@ -2694,7 +2711,8 @@ function fillSettingsForm() {
   if (form.mapUrl) form.mapUrl.value = s.mapUrl || "";
   form.address.value = s.address || "";
   form.workingHours.value = s.workingHours || "";
-  form.deliveryInfo.value = s.deliveryInfo || "";
+  deliveryInfo = s.deliveryInfo || "";
+  if (form.deliveryInfo) form.deliveryInfo.value = deliveryInfo;
   form.currencySymbol.value = s.currencySymbol || "د.ع";
 }
 
