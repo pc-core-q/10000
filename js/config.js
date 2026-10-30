@@ -90,8 +90,8 @@ const STORE_CONFIG = {
 
 // 3.7) الذكاء الاصطناعي (Gemini)
 // الذكاء الاصطناعي (المعمارية الهجينة)
- geminiApiKey: "AQ.Ab8RN6Jku9vEG4_f4iHuszFby7qiaACsp3R7pr0MiSsa89vO3Q", // للصور ومسح الرفوف
-  groqApiKey: "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",  // لتوليد النصوص والأوامر اللحظية
+ geminiApiKey: "", // للصور ومسح الرفوف
+  groqApiKey: "",  // لتوليد النصوص والأوامر اللحظية
 
   /* ======================================================================
      4) الثيم — يتحكم في ألوان وخط وشكل المتجر + لوحة التحكم + صفحة الدخول
