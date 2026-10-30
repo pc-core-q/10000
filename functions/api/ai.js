@@ -5,11 +5,10 @@ export async function onRequestPost(context) {
     const body = await request.json();
     const { action, payload } = body;
 
-    // جلب المفاتيح المشفرة من متغيرات بيئة Cloudflare
     const geminiKey = env.GEMINI_API_KEY;
     const groqKey = env.GROQ_API_KEY;
 
-    // 1) فحص الصور والمستندات (Gemini 3.5 Flash-Lite)
+    // 1) فحص الصور والمستندات والجداول (Gemini 3.5 Flash-Lite)
     if (action === "gemini_vision") {
       if (!geminiKey) {
         return new Response(
@@ -18,18 +17,28 @@ export async function onRequestPost(context) {
         );
       }
 
+      const parts = [{ text: payload.prompt }];
+
+      if (payload.fileText) {
+        // نصوص وجداول الإكسل المرسلة كنص مباشر فائق الدقة
+        parts.push({ text: "\n\n--- بيانات الملف أو الجدول المرفق ---\n" + payload.fileText });
+      } else if (payload.base64Data) {
+        // ملفات PDF الإلكترونية والصور عبر المعالجة المتعددة الوسائط
+        parts.push({
+          inlineData: {
+            mimeType: payload.mimeType || "image/jpeg",
+            data: payload.base64Data
+          }
+        });
+      }
+
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${geminiKey}`;
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: payload.prompt },
-              { inlineData: { mimeType: payload.mimeType || "image/jpeg", data: payload.base64Data } }
-            ]
-          }],
-          generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
+          contents: [{ parts }],
+          generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
         })
       });
 
@@ -66,7 +75,7 @@ export async function onRequestPost(context) {
             { role: "system", content: payload.systemInstruction || "أنت مساعد ذكي لإدارة المتاجر." },
             { role: "user", content: payload.prompt }
           ],
-          temperature: 0.3,
+          temperature: 0.2,
           max_tokens: 1500,
           response_format: payload.asJson ? { type: "json_object" } : undefined
         })
