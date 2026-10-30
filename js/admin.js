@@ -4,10 +4,11 @@
    تم التحديث: 
    1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
    2) دمج أدوات الإدخال إلى: "رفع صورة" (كاميرا أو معرض) و"رفع ملف" (PDF أو إكسل).
-   3) إرسال ملفات الإكسل مباشرة للذكاء الاصطناعي دون قيود على مسميات الأعمدة.
-   4) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
-   5) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
-   6) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
+   3) معالجة الألوان بدقة عالية واستبعاد الأوصاف الشفافة والمائية تلقائياً.
+   4) إرسال ملفات الإكسل مباشرة للذكاء الاصطناعي دون قيود على مسميات الأعمدة.
+   5) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
+   6) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
+   7) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -20,29 +21,62 @@ let pendingColors = [];        // [{ name, hex, image }]
 let pendingSizes = [];         // ["S", "M", ...]
 let pendingInventory = {};     // { "لون||مقاس": qty }
 
-// جدول الألوان الشائعة لتحويل الأسماء إلى درجات Hex تلقائياً
-const COLOR_HEX_MAP = {
-  "أسود": "#000000", "اسود": "#000000", "black": "#000000",
-  "أبيض": "#ffffff", "ابيض": "#ffffff", "white": "#ffffff",
-  "أحمر": "#ef4444", "احمر": "#ef4444", "red": "#ef4444",
-  "أزرق": "#3b82f6", "ازرق": "#3b82f6", "blue": "#3b82f6",
-  "أخضر": "#22c55e", "اخضر": "#22c55e", "green": "#22c55e",
-  "أصفر": "#eab308", "اصفر": "#eab308", "yellow": "#eab308",
-  "بيج": "#f5f5dc", "beige": "#f5f5dc",
-  "رمادي": "#6b7280", "رصاصي": "#6b7280", "gray": "#6b7280", "grey": "#6b7280",
-  "بني": "#854d0e", "brown": "#854d0e",
-  "وردي": "#ec4899", "زهري": "#ec4899", "pink": "#ec4899",
-  "بنفسجي": "#8b5cf6", "purple": "#8b5cf6",
-  "برتقالي": "#f97316", "orange": "#f97316",
-  "كحلي": "#1e3a8a", "navy": "#1e3a8a",
-  "ذهبي": "#eab308", "gold": "#eab308",
-  "فضي": "#d1d5db", "silver": "#d1d5db"
-};
+// جدول الألوان الشامل ودرجاتها الدقيقة
+const COLOR_PALETTE = [
+  { match: ["سماوي", "ازرق فاتح", "أزرق فاتح", "sky", "cyan", "baby blue"], hex: "#38bdf8" },
+  { match: ["كحلي", "ازرق داكن", "أزرق داكن", "نيلي", "navy"], hex: "#1e3a8a" },
+  { match: ["أزرق", "ازرق", "blue"], hex: "#2563eb" },
+  { match: ["أحمر", "احمر", "red", "عنابي", "ماروني", "خمري"], hex: "#ef4444" },
+  { match: ["وردي", "زهري", "بينك", "pink", "فوشي", "فوشيا"], hex: "#ec4899" },
+  { match: ["بنفسجي", "موف", "ارجواني", "أرجواني", "purple", "violet", "لافندر"], hex: "#8b5cf6" },
+  { match: ["أخضر فاتح", "اخضر فاتح", "ليموني", "فسفوري", "lime"], hex: "#84cc16" },
+  { match: ["زيتي", "زيتوني", "olive"], hex: "#65a30d" },
+  { match: ["أخضر", "اخضر", "green"], hex: "#16a34a" },
+  { match: ["أصفر", "اصفر", "yellow"], hex: "#eab308" },
+  { match: ["برتقالي", "مشمشي", "orange", "اورنج"], hex: "#f97316" },
+  { match: ["بيج", "كريمي", "سكري", "اوف وايت", "beige", "offwhite", "off-white"], hex: "#f5f5dc" },
+  { match: ["بني", "جوزي", "قهوائي", "شوكولاته", "brown"], hex: "#78350f" },
+  { match: ["عسلي", "كراميل", "خردلي"], hex: "#b45309" },
+  { match: ["رمادي", "رصاصي", "سيلفر", "فضي", "gray", "grey", "silver"], hex: "#94a3b8" },
+  { match: ["ذهبي", "gold"], hex: "#d97706" },
+  { match: ["أسود", "اسود", "black"], hex: "#0f172a" },
+  { match: ["أبيض", "ابيض", "white"], hex: "#ffffff" }
+];
 
+// فحص واستبعاد الأوصاف الشفافة أو الفيزيائية
+function isTransparentOrInvalidColor(name) {
+  if (!name) return true;
+  const clean = name.trim().toLowerCase();
+  const transparentTokens = ["شفاف", "شفافة", "شفافه", "مائي", "مائيه", "مائية", "عديم اللون", "عديمة اللون", "clear", "transparent", "سائل", "جيل", "جل"];
+  const words = clean.split(/[\s\-_/]+/).filter(Boolean);
+  if (words.length > 0 && words.every(w => transparentTokens.includes(w))) {
+    return true;
+  }
+  return false;
+}
+
+// تنقية اسم اللون من الأوصاف الهامشية (مثل: "أزرق فاتح مائي شفاف" -> "أزرق فاتح")
+function cleanColorName(colorName) {
+  if (!colorName) return "";
+  let cleaned = colorName
+    .replace(/\b(شفاف|شفافة|شفافه|مائي|مائية|مائيه|عديم اللون|clear|transparent)\b/gi, "")
+    .replace(/[\s\-_/]+/g, " ")
+    .trim();
+  return cleaned || colorName.trim();
+}
+
+// دالة فحص اللون واستخراج الدرجة المناسبة بدقة
 function getColorHex(colorName) {
-  if (!colorName) return "#7c9a4c";
+  if (!colorName) return "#2563eb";
   const clean = colorName.trim().toLowerCase();
-  return COLOR_HEX_MAP[clean] || "#7c9a4c";
+
+  for (const item of COLOR_PALETTE) {
+    if (item.match.some(keyword => clean.includes(keyword))) {
+      return item.hex;
+    }
+  }
+
+  return "#2563eb"; // الافتراضي أزرق محايد
 }
 
 // دالة توحيد الحروف للمطابقة الذكية النظيفة
@@ -678,7 +712,13 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
     const currentStock = item.currentStock !== null && item.currentStock !== undefined ? item.currentStock : null;
     const initialBarcode = item.barcode || "";
     const initialDesc = item.description || "";
-    const initialColors = (item.colors || []).join(", ");
+    
+    // تصفية الألوان من الشفاف
+    const cleanColorsList = (item.colors || [])
+      .map(c => cleanColorName(String(c)))
+      .filter(c => c && !isTransparentOrInvalidColor(c));
+    const initialColors = cleanColorsList.join(", ");
+    
     const initialSizes = (item.sizes || []).join(", ");
     const existingId = item.existingId || "";
     const isUpdate = !!existingId;
@@ -1115,7 +1155,13 @@ function wireSmartMediaScanner() {
 
         const colorsRaw = card.querySelector(".shelf-item-colors")?.value.trim() || "";
         const sizesRaw = card.querySelector(".shelf-item-sizes")?.value.trim() || "";
-        const rawColors = colorsRaw ? colorsRaw.split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : [];
+        
+        // استبعاد أي لون شفاف أو قوام مائي تلقائياً عند الحفظ
+        const rawColors = colorsRaw 
+          ? colorsRaw.split(/[,،/|]/)
+              .map(s => cleanColorName(s.trim()))
+              .filter(s => s && !isTransparentOrInvalidColor(s)) 
+          : [];
         const rawSizes = sizesRaw ? sizesRaw.split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : [];
 
         if (name) {
@@ -1306,6 +1352,12 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
     const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
     const existingSizes = existing && existing.sizes ? existing.sizes : [];
 
+    // تنقية الألوان واستبعاد الأوصاف الشفافة أو المائية
+    const rawColorsList = (item.colors && item.colors.length) ? item.colors : existingColors;
+    const filteredColors = (rawColorsList || [])
+      .map(c => cleanColorName(String(c)))
+      .filter(c => c && !isTransparentOrInvalidColor(c));
+
     // تنقية وتثبيت رابط الصورة
     let cleanImageUrl = (item.image || "").trim();
     if (cleanImageUrl) {
@@ -1325,7 +1377,7 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
       currentStock: existing ? (Number(existing.stock) || 0) : null,
       barcode: item.barcode || (existing ? (existing.barcode || existing.sku) : ""),
       description: item.description || (existing ? existing.description : ""),
-      colors: (item.colors && item.colors.length) ? item.colors : existingColors,
+      colors: filteredColors,
       sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
       image: cleanImageUrl,
       existingId: existing ? existing.id : ""
@@ -1681,7 +1733,7 @@ function renderColorsList() {
           '</div>' +
           '<div style="display:flex;flex-direction:column;gap:5px;align-items:center;">' +
             '<label style="font-size:0.8rem;color:var(--ink-400);">الدرجة</label>' +
-            '<input type="color" value="' + escapeHtml(/^#[0-9a-fA-F]{6}$/.test(c.hex || "") ? c.hex : "#7c9a4c") + '" data-color-idx="' + idx + '" class="color-hex-input" style="width:38px;height:38px;padding:0;border:none;cursor:pointer;border-radius:50%;">' +
+            '<input type="color" value="' + escapeHtml(/^#[0-9a-fA-F]{6}$/.test(c.hex || "") ? c.hex : "#2563eb") + '" data-color-idx="' + idx + '" class="color-hex-input" style="width:38px;height:38px;padding:0;border:none;cursor:pointer;border-radius:50%;">' +
           '</div>' +
           '<div class="image-upload" style="margin:0;display:flex;flex-direction:column;gap:5px;min-width:120px;">' +
             '<label style="font-size:0.8rem;color:var(--ink-400);">صورة اللون (اختياري)</label>' +
@@ -1717,6 +1769,9 @@ function renderColorsList() {
       }
 
       pendingColors[idx].name = newName;
+      pendingColors[idx].hex = getColorHex(newName);
+      const hexInp = list.querySelector(`.color-hex-input[data-color-idx="${idx}"]`);
+      if (hexInp) hexInp.value = pendingColors[idx].hex;
       renderInventoryGrid();
     });
   });
@@ -1763,7 +1818,9 @@ function renderInventoryGrid() {
   const stockLabel = document.getElementById("productStockLabel");
   if (!wrap || !grid) return;
 
-  const colors = pendingColors.filter(function (c) { return c.name && c.name.trim(); }).map(function (c) { return c.name.trim(); });
+  const colors = pendingColors
+    .filter(function (c) { return c.name && c.name.trim() && !isTransparentOrInvalidColor(c.name); })
+    .map(function (c) { return cleanColorName(c.name.trim()); });
   const sizes = currentSizesFromInput();
   const hasMatrix = colors.length > 0 || sizes.length > 0;
 
@@ -1856,7 +1913,7 @@ function wireProductModal() {
   if (addColorBtn) {
     addColorBtn.addEventListener("click", function () {
       const defaultName = "لون " + (pendingColors.length + 1);
-      pendingColors.push({ name: defaultName, hex: "#7c9a4c", image: null });
+      pendingColors.push({ name: defaultName, hex: "#2563eb", image: null });
       renderColorsList();
     });
   }
@@ -1973,7 +2030,9 @@ function openProductModal(productId) {
       `).join('');
     }
 
-    pendingColors = (p.colors || []).map(function (c) { return Object.assign({}, c); });
+    pendingColors = (p.colors || [])
+      .filter(c => !isTransparentOrInvalidColor(c.name))
+      .map(function (c) { return Object.assign({}, c, { hex: c.hex || getColorHex(c.name) }); });
     pendingSizes = (p.sizes || []).slice();
     pendingInventory = Object.assign({}, p.inventory || {});
     if (document.getElementById("productSizes")) document.getElementById("productSizes").value = pendingSizes.join(", ");
@@ -2008,12 +2067,16 @@ async function saveProductForm(e) {
     return;
   }
 
+  // تنقية الألوان واستبعاد أي لون شفاف أو قوام مائي
   const cleanColors = pendingColors
-    .filter(function (c) { return (c.name && c.name.trim()) || c.image || c.hex !== "#7c9a4c"; })
+    .filter(function (c) { 
+      return (c.name && c.name.trim() && !isTransparentOrInvalidColor(c.name)) || c.image; 
+    })
     .map(function (c, idx) {
+      const validName = (c.name && c.name.trim()) ? cleanColorName(c.name.trim()) : ("لون " + (idx + 1));
       return {
-        name: (c.name && c.name.trim()) ? c.name.trim() : ("لون " + (idx + 1)),
-        hex: c.hex || "#7c9a4c",
+        name: validName,
+        hex: c.hex || getColorHex(validName),
         image: c.image || null
       };
     });
