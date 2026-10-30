@@ -762,7 +762,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
       }
     });
 
-    // الرفع الفوري التلقائي عبر ImgBB + ImageKit CDN عند اختيار الصورة
+    // الرفع الفوري التلقائي عبر دالة ImgBB المباشرة
     card.querySelector(".shelf-card-file").addEventListener("change", async (ev) => {
       const f = ev.target.files[0];
       if (!f) return;
@@ -785,11 +785,9 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
         card.style.borderColor = "var(--success, #22c55e)";
         showToast("تم رفع وتجهيز صورة المنتج بنجاح!", "success");
       } catch (err) {
-        console.error("فشل رفع صورة الكرت:", err);
+        console.error("Upload error:", err);
         box.innerHTML = originalBoxContent;
-        showToast(err.message || "تعذر رفع الصورة، تحقق من الاتصال.", "error");
-      } finally {
-        ev.target.value = "";
+        showToast(err.message || "فشل رفع الصورة.", "error");
       }
     });
 
@@ -891,7 +889,6 @@ function wireSmartMediaScanner() {
     cancelBtn.addEventListener("click", closeModal);
   }
 
-  // معالجة "رفع صورة"
   if (imgInput && !imgInput.dataset.wired) {
     imgInput.dataset.wired = "1";
     imgInput.addEventListener("change", async (e) => {
@@ -947,7 +944,6 @@ function wireSmartMediaScanner() {
     });
   }
 
-  // معالجة "رفع ملف" (PDF أو Excel)
   if (fileInput && !fileInput.dataset.wired) {
     fileInput.dataset.wired = "1";
     fileInput.addEventListener("change", async (e) => {
@@ -1020,7 +1016,6 @@ function wireSmartMediaScanner() {
     });
   }
 
-  // تأكيد وحفظ التحديثات المجمعة فورياً وبسرعة فائقة
   if (saveBtn && !saveBtn.dataset.wired) {
     saveBtn.dataset.wired = "1";
     saveBtn.addEventListener("click", async () => {
@@ -1065,25 +1060,12 @@ function wireSmartMediaScanner() {
       if (!(await ensureFullCatalogForBulk())) return;
 
       showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", [
-        "جارٍ معالجة المخزون والأسعار...",
+        "جارٍ معالجة وتثبيت صور المنتجات...",
+        "جارٍ مزامنة المخزون والأسعار...",
         "جارٍ ربط وتحديث قاعدة البيانات..."
       ]);
 
       try {
-        // حماية نهائية: رفع أي صورة كانت Base64 وتفريغها إن فشل رفعها
-        const uploadPromises = toProcess.map(async (item) => {
-          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
-            try {
-              const blob = dataURLtoBlob(item.imgUrl);
-              item.imgUrl = await uploadToImgBB(blob, false);
-            } catch (e) {
-              console.warn("ImgBB upload skipped:", e);
-              item.imgUrl = "";
-            }
-          }
-        });
-        await Promise.all(uploadPromises);
-
         let addedCount = 0;
         let updatedCount = 0;
         const touchedProducts = [];
@@ -1092,7 +1074,17 @@ function wireSmartMediaScanner() {
 
         for (let i = 0; i < toProcess.length; i++) {
           const item = toProcess[i];
-          const finalImgUrl = (item.imgUrl && !item.imgUrl.startsWith("data:")) ? item.imgUrl : "";
+          let finalImgUrl = item.imgUrl;
+
+          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
+            try {
+              const blob = dataURLtoBlob(item.imgUrl);
+              finalImgUrl = await uploadToImgBB(blob, false);
+            } catch (e) {
+              console.warn("ImgBB upload fallback:", e);
+              finalImgUrl = "";
+            }
+          }
 
           const cleanItemName = cleanNameForMatch(item.name);
           let existingProduct = item.existingId
@@ -1293,6 +1285,9 @@ function wireExcelSync() {
   });
 }
 
+/* ---------------------------------------------------------------------- */
+/* دالة رفع الصور الأصلية المباشرة والمجربة (ImgBB -> ImageKit CDN)       */
+/* ---------------------------------------------------------------------- */
 async function uploadToImgBB(file, isBanner = false) {
   if (!file) throw new Error("لم يتم اختيار ملف");
 
@@ -1312,7 +1307,12 @@ async function uploadToImgBB(file, isBanner = false) {
   }
 
   const formData = new FormData();
-  formData.append("image", file);
+  // التأكد من إرسال اسم ملف دائماً حتى لو كانت الصورة كائن Blob
+  if (file instanceof Blob && !(file instanceof File)) {
+    formData.append("image", file, "image.jpg");
+  } else {
+    formData.append("image", file);
+  }
 
   const response = await fetch("https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey), {
     method: "POST",
