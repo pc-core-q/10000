@@ -4,7 +4,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta charset="UTF-8">
   <title>لوحة تحكم الأدمن | {{storeName}}</title>
-<link rel="stylesheet" href="css/style.css?v=85">
+  <link rel="stylesheet" href="css/style.css?v=85">
   <link rel="stylesheet" href="css/refresh.css?v=85">
   <script src="js/config.js?v=85"></script>
   <script src="js/themes.js?v=85"></script>
@@ -82,8 +82,8 @@
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
             <input type="text" id="adminProductSearch" placeholder="بحث عن منتج..." style="padding:9px 14px;border-radius:999px;border:1px solid var(--line-strong);font-family:inherit;">
             
-            <!-- زر استيراد وتحديث الأسعار والمخزون من ملف الإكسل -->
-            <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0;" title="تحديث الأسعار والكميات تلقائياً عبر ملف إكسل أو CSV">
+            <!-- زر استيراد وتحديث الأسعار والمخزون من ملف الإكسل (يفتح نافذة المعاينة الآن) -->
+            <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0;" title="معاينة وتحديث الأسعار والكميات عبر ملف إكسل أو CSV">
               <span>📊 استيراد إكسل</span>
               <input type="file" id="excelSyncInput" accept=".xlsx, .xls, .csv" style="display:none;">
             </label>
@@ -91,6 +91,40 @@
             <button class="btn btn-primary btn-sm" id="addProductBtn">__ICON_PLUS__ إضافة منتج</button>
           </div>
         </div>
+
+        <!-- ============ شريط أدوات الذكاء الاصطناعي للمنتجات ============ -->
+        <div class="ai-toolkit-bar" style="background:var(--olive-50); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:18px; display:flex; flex-direction:column; gap:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:1.1rem;">⚡</span>
+              <strong style="font-size:0.95rem; color:var(--ink-500);">التحكم الذكي بالمنتجات والأسعار</strong>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <!-- زر مسح الرفوف وقص المنتجات -->
+              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="التقاط أو رفع صورة لرف كامل ليتم قص وتفكيك المنتجات آلياً">
+                <span>📷 مسح رف بالكاميرا</span>
+                <input type="file" id="shelfImageInput" accept="image/*" capture="environment" style="display:none;">
+              </label>
+
+              <!-- زر مسح الفواتير والوصولات الورقية -->
+              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="تصوير وصل شراء أو قائمة أسعار ورقية واستخراج البضاعة منها">
+                <span>📄 مسح وصل / قائمة ورقية</span>
+                <input type="file" id="invoiceImageInput" accept="image/*" capture="environment" style="display:none;">
+              </label>
+            </div>
+          </div>
+
+          <!-- شريط تعديل الأسعار بالأوامر الطبيعية -->
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <input type="text" id="aiPriceCommandInput" placeholder="اكتب أمراً مثل: خصم 10% على قسم العناية بالشعر، أو أرجع الأسعار الأصلية..." style="flex:1; min-width:260px; padding:9px 14px; border-radius:8px; border:1px solid var(--line-strong); font-size:0.9rem; font-family:inherit; background:#fff;">
+            <button type="button" id="btnExecutePriceCommand" class="btn btn-primary btn-sm" style="white-space:nowrap;">
+              تطبيق التسعير الذكي ✨
+            </button>
+          </div>
+        </div>
+        <!-- ============================================================== -->
+
         <div style="overflow-x:auto;">
           <table class="admin-table">
             <thead><tr><th>الصورة</th><th>الباركود</th><th>الاسم</th><th>القسم</th><th>السعر</th><th>الكمية</th><th>الحالة</th><th>إجراءات</th></tr></thead>
@@ -156,7 +190,7 @@
       </div>
     </section>
 
-    <!-- ---- Settings panel ---- -->
+    <!-- ---- Out of Stock panel ---- -->
     <section class="admin-panel-view" id="panel-outofstock" style="display:none;">
       <div class="admin-panel">
         <div class="panel-head">
@@ -180,6 +214,7 @@
       </div>
     </section>
 
+    <!-- ---- Settings panel ---- -->
     <section class="admin-panel-view" id="panel-settings" style="display:none;">
       <div class="admin-panel" style="max-width:640px;">
         <div class="panel-head"><h3 style="margin:0;">إعدادات المتجر</h3></div>
@@ -228,22 +263,29 @@
         </div>
       </div>
       
-      <!-- ============ إضافة حقل الصور المتعددة ============ -->
       <div class="field">
         <label>صور إضافية للمنتج (اختياري)</label>
         <input type="file" id="productExtraImagesInput" accept="image/*" multiple>
         <div id="extraImagesPreview" style="display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap;"></div>
       </div>
-      <!-- =================================================== -->
 
-      <!-- حقل الباركود / كود المادة SKU لربطه بنظام المحاسبة والإكسل -->
       <div class="field">
         <label>الباركود / SKU (اختياري — للمزامنة مع نظام المحاسبة)</label>
         <input type="text" id="productBarcode" placeholder="امسح بالباركود أو اكتب الكود هنا...">
       </div>
 
       <div class="field"><label>اسم المنتج</label><input type="text" id="productName" required></div>
-      <div class="field"><label>الوصف</label><textarea id="productDescription"></textarea></div>
+      
+      <div class="field">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <label for="productDescription" style="margin: 0;">الوصف</label>
+          <button type="button" id="btnAiGenDesc" class="btn btn-secondary btn-sm" style="font-size: 11px; padding: 3px 8px; cursor: pointer; border-radius: var(--r-ctl);">
+            ✨ توليد بالذكاء الاصطناعي
+          </button>
+        </div>
+        <textarea id="productDescription" rows="3" placeholder="وصف المنتج، المزايا، الخامة..."></textarea>
+      </div>
+
       <div class="field"><label>السعر (د.ع)</label><input type="number" id="productPrice" min="0" required></div>
       <div class="field"><label>السعر القديم قبل الخصم (اختياري)</label><input type="number" id="productOldPrice" min="0" placeholder="يظهر مشطوباً بجانب السعر عند تفعيل «عرض خاص»"></div>
       <div class="field"><label>القسم</label><select id="productCategorySelect" required></select></div>
@@ -343,6 +385,39 @@
   </div>
 </div>
 
+<!-- ============ النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة (رفوف / إكسل / فواتير ورقية) ============ -->
+<div class="modal-overlay" id="shelfScanModal" style="display:none;">
+  <div class="modal-card" style="max-width: 95vw; width: 920px; max-height: 92vh; overflow-y: auto;">
+    <div class="modal-head">
+      <h3 id="batchModalTitle" style="margin:0;">مراجعة وتأكيد البضائع المستخرجة 📦</h3>
+      <button class="close-modal" id="closeShelfScanModal">__ICON_CLOSE__</button>
+    </div>
+    
+    <!-- شريط التحكم السريع في عناصر المعاينة -->
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 0 6px 0; background:var(--olive-50); padding:10px 14px; border-radius:8px; border:1px solid var(--line);">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:600; font-size:0.88rem; cursor:pointer; margin:0;">
+          <input type="checkbox" id="batchSelectAll" checked>
+          <span>تحديد الكل</span>
+        </label>
+        <span id="shelfScanStatus" style="font-size:0.85rem; color:var(--ink-400);"></span>
+      </div>
+      <span class="field-hint" style="margin:0; font-size:0.8rem;">يمكنك تعديل الاسم، السعر، القسم أو ربط الصور لكل منتج قبل الحفظ.</span>
+    </div>
+
+    <!-- شبكة بطاقات المنتجات المعاينة -->
+    <div id="shelfDetectedList" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:14px; margin:15px 0;"></div>
+    
+    <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:15px; margin-top:10px; flex-wrap:wrap; gap:10px;">
+      <span id="batchSelectedCounter" style="font-size:0.88rem; font-weight:bold; color:var(--primary);"></span>
+      <div style="display:flex; gap:10px;">
+        <button type="button" class="btn btn-outline btn-sm" id="btnCancelShelfScan">إلغاء</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnSaveShelfProducts">حفظ المنتجات المحددة في المتجر</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- مكتبة SheetJS لقراءة وتفكيك ملفات Excel و CSV مباشرة في المتصفح -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
@@ -354,6 +429,7 @@
 <script src="js/whatsapp.js?v=85"></script>
 <script src="js/app.js?v=85"></script>
 <script src="js/auth.js?v=85"></script>
+<script src="js/ai.js?v=85"></script>
 <script src="js/admin.js?v=85"></script>
 <script>
   // تعبئة الأيقونات الثابتة
@@ -372,7 +448,6 @@
 
   document.getElementById("adminSidebarToggle").innerHTML = iconSvg("menu");
   
-  // زر إغلاق القائمة الجانبية للأدمن في الموبايل
   const closeSidebarBtn = document.querySelector(".admin-close-sidebar");
   if (closeSidebarBtn) {
     closeSidebarBtn.innerHTML = iconSvg("close");
@@ -386,6 +461,10 @@
   document.getElementById("addAdBtn").innerHTML = iconSvg("plus") + " إضافة إعلان";
   document.getElementById("closeAdModal").innerHTML = iconSvg("close");
   
+  if (document.getElementById("closeShelfScanModal")) {
+    document.getElementById("closeShelfScanModal").innerHTML = iconSvg("close");
+  }
+  
   if(document.getElementById("removeProductImageBtn")) {
       document.getElementById("removeProductImageBtn").innerHTML = iconSvg("trash");
   }
@@ -395,8 +474,6 @@
   if(document.getElementById("removeAdImageBtn")) {
       document.getElementById("removeAdImageBtn").innerHTML = iconSvg("trash");
   }
-
-  // ملاحظة: renderOrdersTable() في admin.js تكتب الآن في الجدولين (ordersTableBody و ordersTableBody2).
 </script>
 </body>
 </html>
