@@ -101,22 +101,16 @@
             </div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-              <!-- زر مسح الرفوف بالكاميرا أو الاستوديو -->
-              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="التقاط أو رفع صورة لرف كامل ليتم قص وتفكيك المنتجات آلياً">
-                <span>📷 مسح رف</span>
-                <input type="file" id="shelfImageInput" accept="image/*" style="display:none;">
+              <!-- زر رفع صورة: يدمج الكاميرا والمعرض لكل من الرف، الوصل، أو السكرين شوت -->
+              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="تصوير بالكاميرا أو اختيار صورة من المعرض (وصل، رف، أو سكرين شوت)">
+                <span>🖼️ رفع صورة</span>
+                <input type="file" id="aiImageInput" accept="image/*" style="display:none;">
               </label>
 
-              <!-- زر تصوير وصل بالكاميرا مباشرة -->
-              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="تصوير وصل شراء ورقي بالكاميرا مباشرة">
-                <span>📷 تصوير وصل</span>
-                <input type="file" id="invoiceCameraInput" accept="image/*" capture="environment" style="display:none;">
-              </label>
-
-              <!-- زر رفع وصل / سكرين شوت من المعرض -->
-              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="اختيار صورة وصل أو لقطة شاشة من الاستوديو">
-                <span>🖼️ رفع سكرين شوت</span>
-                <input type="file" id="invoiceGalleryInput" accept="image/*" style="display:none;">
+              <!-- زر رفع ملف: مستندات PDF وقوائم الفواتير الإلكترونية مباشرة -->
+              <label class="btn btn-outline btn-sm" style="cursor:pointer; display:inline-flex; align-items:center; gap:6px; margin:0; background:#fff;" title="رفع فاتورة PDF، مستند، أو جدول بضائع">
+                <span>📄 رفع ملف</span>
+                <input type="file" id="aiFileInput" accept=".pdf, .xlsx, .xls, .csv, application/pdf" style="display:none;">
               </label>
             </div>
           </div>
@@ -391,7 +385,7 @@
   </div>
 </div>
 
-<!-- ============ النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة (رفوف / إكسل / فواتير ورقية) ============ -->
+<!-- ============ النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة ============ -->
 <div class="modal-overlay" id="shelfScanModal" style="display:none;">
   <div class="modal-card" style="max-width: 95vw; width: 920px; max-height: 92vh; overflow-y: auto;">
     <div class="modal-head">
