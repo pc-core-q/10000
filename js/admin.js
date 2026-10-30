@@ -1,14 +1,6 @@
 /* ==========================================================================
    admin.js
    منطق لوحة تحكم الأدمن بالكامل (admin.html). 
-   تم التحديث: 
-   1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
-   2) دمج أدوات الإدخال إلى: "رفع صورة" (كاميرا أو معرض) و"رفع ملف" (PDF أو إكسل).
-   3) معالجة الألوان بدقة عالية واستبعاد الأوصاف الشفافة والمائية تلقائياً.
-   4) إرسال ملفات الإكسل مباشرة للذكاء الاصطناعي دون قيود على مسميات الأعمدة.
-   5) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
-   6) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
-   7) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -43,19 +35,14 @@ const COLOR_PALETTE = [
   { match: ["أبيض", "ابيض", "white"], hex: "#ffffff" }
 ];
 
-// فحص واستبعاد الأوصاف الشفافة أو الفيزيائية
 function isTransparentOrInvalidColor(name) {
   if (!name) return true;
   const clean = name.trim().toLowerCase();
   const transparentTokens = ["شفاف", "شفافة", "شفافه", "مائي", "مائيه", "مائية", "عديم اللون", "عديمة اللون", "clear", "transparent", "سائل", "جيل", "جل"];
   const words = clean.split(/[\s\-_/]+/).filter(Boolean);
-  if (words.length > 0 && words.every(w => transparentTokens.includes(w))) {
-    return true;
-  }
-  return false;
+  return words.length > 0 && words.every(w => transparentTokens.includes(w));
 }
 
-// تنقية اسم اللون من الأوصاف الهامشية (مثل: "أزرق فاتح مائي شفاف" -> "أزرق فاتح")
 function cleanColorName(colorName) {
   if (!colorName) return "";
   let cleaned = colorName
@@ -65,21 +52,17 @@ function cleanColorName(colorName) {
   return cleaned || colorName.trim();
 }
 
-// دالة فحص اللون واستخراج الدرجة المناسبة بدقة
 function getColorHex(colorName) {
   if (!colorName) return "#2563eb";
   const clean = colorName.trim().toLowerCase();
-
   for (const item of COLOR_PALETTE) {
     if (item.match.some(keyword => clean.includes(keyword))) {
       return item.hex;
     }
   }
-
-  return "#2563eb"; // الافتراضي أزرق محايد
+  return "#2563eb";
 }
 
-// دالة توحيد الحروف للمطابقة الذكية النظيفة
 function cleanNameForMatch(str) {
   if (!str) return "";
   return String(str)
@@ -91,9 +74,6 @@ function cleanNameForMatch(str) {
     .replace(/[\s\-_/]+/g, " ");
 }
 
-/* ---------------------------------------------------------------------- */
-/* دالة الإنشاء السريع للقسم وتحديث القوائم في الكروت                      */
-/* ---------------------------------------------------------------------- */
 function fastAddCategory(catName) {
   if (!catName || !catName.trim()) return null;
   const clean = cleanNameForMatch(catName);
@@ -134,9 +114,6 @@ function refreshAllBatchCategorySelects(targetCard = null, selectId = null) {
   });
 }
 
-/* ---------------------------------------------------------------------- */
-/* شاشة التحميل المتوافقة مع دليل التصميم ونظام الثيمات                   */
-/* ---------------------------------------------------------------------- */
 let _processLoaderTimer = null;
 
 function showProcessLoader(title = "جارٍ معالجة البيانات...", customSteps = []) {
@@ -147,86 +124,29 @@ function showProcessLoader(title = "جارٍ معالجة البيانات...", 
     style.id = "processLoaderStyles";
     style.textContent = `
       #processLoadingOverlay {
-        position: fixed;
-        inset: 0;
-        background: var(--overlay, rgba(15, 23, 42, 0.65));
-        backdrop-filter: blur(4px);
-        -webkit-backdrop-filter: blur(4px);
-        z-index: 999999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 16px;
-        opacity: 0;
-        transition: opacity 0.25s ease;
-        font-family: var(--font-body, inherit);
+        position: fixed; inset: 0; background: var(--overlay, rgba(15, 23, 42, 0.65));
+        backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 999999;
+        display: flex; align-items: center; justify-content: center; padding: 16px;
+        opacity: 0; transition: opacity 0.25s ease; font-family: var(--font-body, inherit);
       }
       #processLoadingOverlay.active { opacity: 1; }
       .process-loader-card {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        width: 100%;
-        max-width: 400px;
-        border-radius: var(--r-card, 14px);
-        padding: 28px 24px;
-        text-align: center;
+        background: var(--surface); border: 1px solid var(--border); width: 100%; max-width: 400px;
+        border-radius: var(--r-card, 14px); padding: 28px 24px; text-align: center;
         box-shadow: var(--shadow-card, 0 10px 25px -5px rgba(0, 0, 0, 0.1));
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 14px;
-        transform: scale(0.95);
-        transition: transform 0.25s ease;
+        display: flex; flex-direction: column; align-items: center; gap: 14px; transform: scale(0.95); transition: transform 0.25s ease;
       }
       #processLoadingOverlay.active .process-loader-card { transform: scale(1); }
       .process-spinner {
-        width: 44px;
-        height: 44px;
-        border: 3px solid var(--border-soft, rgba(var(--text-rgb, 15, 23, 42), 0.1));
-        border-top-color: var(--primary);
-        border-radius: 50%;
-        animation: processSpin 0.85s linear infinite;
+        width: 44px; height: 44px; border: 3px solid var(--border-soft, rgba(var(--text-rgb, 15, 23, 42), 0.1));
+        border-top-color: var(--primary); border-radius: 50%; animation: processSpin 0.85s linear infinite;
       }
-      @keyframes processSpin {
-        to { transform: rotate(360deg); }
-      }
-      .process-loader-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: var(--heading-color, var(--primary));
-        margin: 0;
-      }
-      .process-loader-step {
-        font-size: 0.85rem;
-        color: var(--text-2);
-        min-height: 20px;
-        margin: 0;
-        transition: opacity 0.2s ease;
-      }
-      .process-progress-track {
-        width: 100%;
-        height: 5px;
-        background: var(--surface-2, rgba(var(--text-rgb, 15, 23, 42), 0.05));
-        border-radius: var(--r-ctl, 999px);
-        overflow: hidden;
-        position: relative;
-        margin-top: 4px;
-      }
-      .process-progress-bar {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 35%;
-        background: var(--primary);
-        border-radius: var(--r-ctl, 999px);
-        animation: processProgressLoop 1.6s infinite ease-in-out;
-      }
-      @keyframes processProgressLoop {
-        0% { left: -35%; width: 25%; }
-        50% { width: 55%; }
-        100% { left: 100%; width: 25%; }
-      }
+      @keyframes processSpin { to { transform: rotate(360deg); } }
+      .process-loader-title { font-size: 1.05rem; font-weight: 700; color: var(--heading-color, var(--primary)); margin: 0; }
+      .process-loader-step { font-size: 0.85rem; color: var(--text-2); min-height: 20px; margin: 0; transition: opacity 0.2s ease; }
+      .process-progress-track { width: 100%; height: 5px; background: var(--surface-2, rgba(var(--text-rgb, 15, 23, 42), 0.05)); border-radius: var(--r-ctl, 999px); overflow: hidden; position: relative; margin-top: 4px; }
+      .process-progress-bar { position: absolute; top: 0; bottom: 0; left: 0; width: 35%; background: var(--primary); border-radius: var(--r-ctl, 999px); animation: processProgressLoop 1.6s infinite ease-in-out; }
+      @keyframes processProgressLoop { 0% { left: -35%; width: 25%; } 50% { width: 55%; } 100% { left: 100%; width: 25%; } }
     `;
     document.head.appendChild(style);
 
@@ -281,15 +201,10 @@ function hideProcessLoader() {
   const overlay = document.getElementById("processLoadingOverlay");
   if (overlay) {
     overlay.classList.remove("active");
-    setTimeout(() => {
-      overlay.style.display = "none";
-    }, 250);
+    setTimeout(() => { overlay.style.display = "none"; }, 250);
   }
 }
 
-/* ---------------------------------------------------------------------- */
-/* دالة مساعدة لرفع رقم نسخة الأقسام والإعلانات والإعدادات لحظياً         */
-/* ---------------------------------------------------------------------- */
 function bumpMetaVersion() {
   try {
     if (typeof firebase !== "undefined" && firebase.database) {
@@ -300,24 +215,16 @@ function bumpMetaVersion() {
   }
 }
 
-/* ---------------------------------------------------------------------- */
-/* مساعدة لتحويل DataURL إلى كائن Blob لرفعه إلى ImgBB                     */
-/* ---------------------------------------------------------------------- */
 function dataURLtoBlob(dataurl) {
   const arr = dataurl.split(',');
   const mime = arr[0].match(/:(.*?);/)[1];
   const bstr = atob(arr[1]);
   let n = bstr.length;
   const u8arr = new Uint8Array(n);
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
-  }
+  while (n--) { u8arr[n] = bstr.charCodeAt(n); }
   return new Blob([u8arr], { type: mime });
 }
 
-/* ---------------------------------------------------------------------- */
-/* بدء تشغيل الصفحة والتهيئة                                              */
-/* ---------------------------------------------------------------------- */
 async function initAdminPage() {
   const app = document.getElementById("adminApp");
   if (!app) return;
@@ -350,9 +257,7 @@ async function initAdminPage() {
   if (logoutBtn) logoutBtn.addEventListener("click", handleAdminLogout);
   
   const sidebarToggle = document.getElementById("adminSidebarToggle");
-  if (sidebarToggle) {
-    sidebarToggle.addEventListener("click", toggleAdminSidebar);
-  }
+  if (sidebarToggle) { sidebarToggle.addEventListener("click", toggleAdminSidebar); }
 
   renderStats();
   renderProductsTable();
@@ -369,7 +274,6 @@ async function initAdminPage() {
   wireAdModal(); 
   wireSettingsForm();
 
-  // تفعيل الميزات الذكية وإدارات الاستيراد الموحدة
   wireExcelSync();
   wireSmartMediaScanner();
   wireAiPricing();
@@ -380,9 +284,6 @@ async function initAdminPage() {
   showUpdateNotice();
 }
 
-/* ---------------------------------------------------------------------- */
-/* إشعار "تم تحديث الموقع"                                                */
-/* ---------------------------------------------------------------------- */
 const UPDATE_NOTICE_ID = "2026-10-19";
 const UPDATE_NOTICE_KEY = "ws_admin_update_seen";
 
@@ -402,7 +303,6 @@ function showUpdateNotice() {
   if (closeBtn) closeBtn.addEventListener("click", dismiss);
   if (okBtn) okBtn.addEventListener("click", dismiss);
   modal.addEventListener("click", function (e) { if (e.target === modal) dismiss(); });
-
   modal.classList.add("open");
 }
 
@@ -442,9 +342,6 @@ async function openProductForEdit(productId) {
   openProductModal(productId);
 }
 
-/* ---------------------------------------------------------------------- */
-/* مزامنة البيانات مع Algolia                                             */
-/* ---------------------------------------------------------------------- */
 let _algoliaKeyDeclined = false;
 function algoliaConfigured() {
   const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
@@ -547,9 +444,6 @@ async function deleteProductFromAlgolia(productId) {
   }
 }
 
-/* ---------------------------------------------------------------------- */
-/* 1) ميزة التسعير بالأوامر الطبيعية                                     */
-/* ---------------------------------------------------------------------- */
 function wireAiPricing() {
   const btn = document.getElementById("btnExecutePriceCommand");
   const input = document.getElementById("aiPriceCommandInput");
@@ -679,9 +573,6 @@ function wireAiPricing() {
   });
 }
 
-/* ---------------------------------------------------------------------- */
-/* 2) النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة                   */
-/* ---------------------------------------------------------------------- */
 function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد البضائع المستخرجة 📦") {
   const modal = document.getElementById("shelfScanModal");
   const container = document.getElementById("shelfDetectedList");
@@ -713,7 +604,6 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
     const initialBarcode = item.barcode || "";
     const initialDesc = item.description || "";
     
-    // تصفية الألوان من الشفاف
     const cleanColorsList = (item.colors || [])
       .map(c => cleanColorName(String(c)))
       .filter(c => c && !isTransparentOrInvalidColor(c));
@@ -765,7 +655,6 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 
       <input type="text" class="shelf-item-name" value="${escapeHtml(initialName)}" placeholder="اسم المنتج الأساسي" style="padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-weight:600;">
       
-      <!-- اختيار أو إنشاء القسم بسرعة -->
       <div>
         <div style="display:flex; gap:6px; align-items:center;">
           <select class="shelf-item-category" style="flex:1; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-family:inherit; background:var(--surface); color:var(--text);">
@@ -787,7 +676,6 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 
       <textarea class="shelf-item-desc" placeholder="وصف المنتج ومميزاته ومواصفاته..." rows="2" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.8rem; resize:vertical; font-family:inherit;">${escapeHtml(initialDesc)}</textarea>
 
-      <!-- حقول الألوان والمقاسات التلقائية -->
       <div style="display:flex; gap:6px;">
         <div style="flex:1;">
           <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">الألوان (اختياري)</label>
@@ -837,9 +725,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
         const catName = prompt("اكتب اسم القسم الجديد:");
         if (catName && catName.trim()) {
           const newId = fastAddCategory(catName);
-          if (newId) {
-            refreshAllBatchCategorySelects(card, newId);
-          }
+          if (newId) { refreshAllBatchCategorySelects(card, newId); }
         }
       });
     }
@@ -872,26 +758,42 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
         const box = card.querySelector(".shelf-img-box");
         box.innerHTML = `<img class="shelf-item-img" src="${escapeHtml(url.trim())}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
         card.querySelector(".shelf-item-check").setAttribute("data-crop", url.trim());
-        card.style.borderColor = "var(--olive-600, #4ade80)";
+        card.style.borderColor = "var(--success, #22c55e)";
       }
     });
 
-    card.querySelector(".shelf-card-file").addEventListener("change", (ev) => {
+    // الرفع الفوري التلقائي عبر ImgBB + ImageKit CDN عند اختيار الصورة
+    card.querySelector(".shelf-card-file").addEventListener("change", async (ev) => {
       const f = ev.target.files[0];
-      if (f) {
-        const r = new FileReader();
-        r.onload = (e2) => {
-          const box = card.querySelector(".shelf-img-box");
-          box.innerHTML = `<img class="shelf-item-img" src="${e2.target.result}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
-          card.querySelector(".shelf-item-check").setAttribute("data-crop", e2.target.result);
-          card.style.borderColor = "var(--olive-600, #4ade80)";
-        };
-        r.readAsDataURL(f);
+      if (!f) return;
+
+      const box = card.querySelector(".shelf-img-box");
+      const checkEl = card.querySelector(".shelf-item-check");
+      const originalBoxContent = box.innerHTML;
+
+      box.innerHTML = `
+        <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:var(--primary);">
+          <div class="process-spinner" style="width:24px; height:24px; border-width:2px;"></div>
+          <span style="font-size:11px; font-weight:600;">جارٍ رفع الصورة...</span>
+        </div>
+      `;
+
+      try {
+        const cdnUrl = await uploadToImgBB(f, false);
+        box.innerHTML = `<img class="shelf-item-img" src="${escapeHtml(cdnUrl)}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+        checkEl.setAttribute("data-crop", cdnUrl);
+        card.style.borderColor = "var(--success, #22c55e)";
+        showToast("تم رفع وتجهيز صورة المنتج بنجاح!", "success");
+      } catch (err) {
+        console.error("فشل رفع صورة الكرت:", err);
+        box.innerHTML = originalBoxContent;
+        showToast(err.message || "تعذر رفع الصورة، تحقق من الاتصال.", "error");
+      } finally {
+        ev.target.value = "";
       }
     });
 
     card.querySelector(".shelf-item-check").addEventListener("change", updateCounter);
-
     container.appendChild(card);
   });
 
@@ -911,9 +813,6 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
   modal.classList.add("open");
 }
 
-/* ---------------------------------------------------------------------- */
-/* معالجة ملفات الإكسل مباشرة عبر الذكاء الاصطناعي مع استخراج الروابط      */
-/* ---------------------------------------------------------------------- */
 async function handleExcelFileWithAI(file) {
   showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
     "جارٍ قراءة وتفريغ جدول الإكسل والروابط...",
@@ -927,7 +826,6 @@ async function handleExcelFileWithAI(file) {
     const workbook = XLSX.read(data);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
-    // فحص جميع الخلايا واستخراج الروابط التشعبية المضمنة (Hyperlinks) حتى لا تضيع روابط الصور
     Object.keys(sheet).forEach(cellRef => {
       if (cellRef.startsWith("!")) return;
       const cell = sheet[cellRef];
@@ -938,19 +836,14 @@ async function handleExcelFileWithAI(file) {
       }
     });
 
-    // تحويل الجدول إلى نص CSV متكامل
     const csvText = XLSX.utils.sheet_to_csv(sheet);
-
     if (!csvText || !csvText.trim()) {
       hideProcessLoader();
       showToast("ملف الإكسل فارغ أو لا يحتوي على بيانات.", "error");
       return;
     }
 
-    // جلب أقسام المتجر الحالية لتمريرها للذكاء الاصطناعي للاختيار منها تلقائياً
     const storeCategories = Store.getCategories().map(c => c.name);
-
-    // إرسال النص مباشرة إلى Gemini مع قائمة الأقسام
     const result = await window.StoreAI.scanInvoice(csvText, "text/csv", storeCategories);
     const rawItems = (result && result.items) ? result.items : [];
 
@@ -968,9 +861,6 @@ async function handleExcelFileWithAI(file) {
   }
 }
 
-/* ---------------------------------------------------------------------- */
-/* 3) المعالجة الموحدة للوسائط الذكية (رفع صورة شاملة / رفع ملف مستند)     */
-/* ---------------------------------------------------------------------- */
 function wireSmartMediaScanner() {
   const imgInput = document.getElementById("aiImageInput");
   const fileInput = document.getElementById("aiFileInput");
@@ -1001,7 +891,7 @@ function wireSmartMediaScanner() {
     cancelBtn.addEventListener("click", closeModal);
   }
 
-  // أ) معالجة "رفع صورة" (كاميرا أو معرض)
+  // معالجة "رفع صورة"
   if (imgInput && !imgInput.dataset.wired) {
     imgInput.dataset.wired = "1";
     imgInput.addEventListener("change", async (e) => {
@@ -1057,7 +947,7 @@ function wireSmartMediaScanner() {
     });
   }
 
-  // ب) معالجة "رفع ملف" (فواتير PDF مباشرة أو ملفات Excel)
+  // معالجة "رفع ملف" (PDF أو Excel)
   if (fileInput && !fileInput.dataset.wired) {
     fileInput.dataset.wired = "1";
     fileInput.addEventListener("change", async (e) => {
@@ -1066,7 +956,6 @@ function wireSmartMediaScanner() {
 
       const fileName = file.name.toLowerCase();
 
-      // معالجة الإكسل مباشرة عبر الذكاء الاصطناعي
       if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv")) {
         try {
           await handleExcelFileWithAI(file);
@@ -1076,7 +965,6 @@ function wireSmartMediaScanner() {
         return;
       }
 
-      // معالجة ملفات PDF مباشرة
       if (fileName.endsWith(".pdf") || file.type === "application/pdf") {
         if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") {
           showToast("خدمة الذكاء الاصطناعي غير متوفرة", "error");
@@ -1132,7 +1020,7 @@ function wireSmartMediaScanner() {
     });
   }
 
-  // ج) تأكيد وحفظ التحديثات المجمعة
+  // تأكيد وحفظ التحديثات المجمعة فورياً وبسرعة فائقة
   if (saveBtn && !saveBtn.dataset.wired) {
     saveBtn.dataset.wired = "1";
     saveBtn.addEventListener("click", async () => {
@@ -1156,7 +1044,6 @@ function wireSmartMediaScanner() {
         const colorsRaw = card.querySelector(".shelf-item-colors")?.value.trim() || "";
         const sizesRaw = card.querySelector(".shelf-item-sizes")?.value.trim() || "";
         
-        // استبعاد أي لون شفاف أو قوام مائي تلقائياً عند الحفظ
         const rawColors = colorsRaw 
           ? colorsRaw.split(/[,،/|]/)
               .map(s => cleanColorName(s.trim()))
@@ -1178,30 +1065,34 @@ function wireSmartMediaScanner() {
       if (!(await ensureFullCatalogForBulk())) return;
 
       showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", [
-        "جارٍ معالجة ورفع صور المنتجات...",
-        "جارٍ مزامنة وتحديث كميات المخزون...",
+        "جارٍ معالجة المخزون والأسعار...",
         "جارٍ ربط وتحديث قاعدة البيانات..."
       ]);
 
       try {
+        // حماية نهائية: رفع أي صورة كانت Base64 وتفريغها إن فشل رفعها
+        const uploadPromises = toProcess.map(async (item) => {
+          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
+            try {
+              const blob = dataURLtoBlob(item.imgUrl);
+              item.imgUrl = await uploadToImgBB(blob, false);
+            } catch (e) {
+              console.warn("ImgBB upload skipped:", e);
+              item.imgUrl = "";
+            }
+          }
+        });
+        await Promise.all(uploadPromises);
+
         let addedCount = 0;
         let updatedCount = 0;
         const touchedProducts = [];
         let allProducts = Store.getProducts();
-
         const now = Date.now();
+
         for (let i = 0; i < toProcess.length; i++) {
           const item = toProcess[i];
-          let finalImgUrl = item.imgUrl;
-
-          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
-            try {
-              const blob = dataURLtoBlob(item.imgUrl);
-              finalImgUrl = await uploadToImgBB(blob, false);
-            } catch (e) {
-              console.warn("ImgBB upload failed, falling back to dataUrl:", e);
-            }
-          }
+          const finalImgUrl = (item.imgUrl && !item.imgUrl.startsWith("data:")) ? item.imgUrl : "";
 
           const cleanItemName = cleanNameForMatch(item.name);
           let existingProduct = item.existingId
@@ -1255,7 +1146,6 @@ function wireSmartMediaScanner() {
             if (mergedColors.length) existingProduct.colors = mergedColors;
             if (mergedSizes.length) existingProduct.sizes = mergedSizes;
 
-            // جمع الكمية الواردة إلى الرصيد الحالي للمنتج (+)
             const incomingQty = Number(item.stock) || 0;
             const currentTotalStock = Number(existingProduct.stock) || 0;
 
@@ -1311,18 +1201,17 @@ function wireSmartMediaScanner() {
         hideProcessLoader();
         renderProductsTable();
         renderStats();
-        showToast(`تم بنجاح! تمت إضافة (${addedCount}) منتج وتحديث رصيد (${updatedCount}) منتج. 🚀`, "success");
+        showToast(`تم بنجاح! إضافة (${addedCount}) منتج وتحديث رصيد (${updatedCount}) منتج 🚀`, "success");
         closeModal();
       } catch (err) {
         hideProcessLoader();
-        console.error(err);
+        console.error("Save products error:", err);
         showToast("حدث خطأ أثناء حفظ البيانات: " + err.message, "error");
       }
     });
   }
 }
 
-// دالة توحيد المطابقة وفتح شاشة المراجعة (مع تنقية وتثبيت روابط الصور ومطابقة الأقسام)
 function processAndOpenBatchReview(rawItems, modalTitle) {
   const existingProducts = Store.getAdminProducts();
   const categories = Store.getCategories();
@@ -1352,13 +1241,11 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
     const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
     const existingSizes = existing && existing.sizes ? existing.sizes : [];
 
-    // تنقية الألوان واستبعاد الأوصاف الشفافة أو المائية
     const rawColorsList = (item.colors && item.colors.length) ? item.colors : existingColors;
     const filteredColors = (rawColorsList || [])
       .map(c => cleanColorName(String(c)))
       .filter(c => c && !isTransparentOrInvalidColor(c));
 
-    // تنقية وتثبيت رابط الصورة
     let cleanImageUrl = (item.image || "").trim();
     if (cleanImageUrl) {
       const urlMatch = cleanImageUrl.match(/https?:\/\/[^\s"'<>]+/);
@@ -1389,9 +1276,6 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
   showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
 }
 
-/* ---------------------------------------------------------------------- */
-/* 4) ربط زر استيراد الإكسل المباشر ليعمل بنفس دقة الذكاء الاصطناعي        */
-/* ---------------------------------------------------------------------- */
 function wireExcelSync() {
   const fileInput = document.getElementById("excelSyncInput");
   if (!fileInput || fileInput.dataset.wired) return;
@@ -1409,9 +1293,6 @@ function wireExcelSync() {
   });
 }
 
-/* ---------------------------------------------------------------------- */
-/* رفع ومعالجة الصور عبر ImgBB و ImageKit CDN                             */
-/* ---------------------------------------------------------------------- */
 async function uploadToImgBB(file, isBanner = false) {
   if (!file) throw new Error("لم يتم اختيار ملف");
 
@@ -1457,9 +1338,6 @@ async function uploadToImgBB(file, isBanner = false) {
   return imageKitEndpoint + "/" + transform + "/" + match[1];
 }
 
-/* ---------------------------------------------------------------------- */
-/* التنقل والقائمة الجانبية                                              */
-/* ---------------------------------------------------------------------- */
 function wireSidebarNav() {
   const buttons = document.querySelectorAll(".admin-nav button[data-panel]");
   buttons.forEach(function (btn) {
@@ -1484,9 +1362,6 @@ window.toggleAdminSidebar = function() {
   if (overlay) overlay.classList.toggle('active');
 };
 
-/* ---------------------------------------------------------------------- */
-/* لوحة الإحصائيات                                                       */
-/* ---------------------------------------------------------------------- */
 function renderStats() {
   renderOutOfStock();
   const products = Store.getAdminProducts();
@@ -1504,9 +1379,6 @@ function renderStats() {
   }).join("");
 }
 
-/* ---------------------------------------------------------------------- */
-/* جدول المنتجات (مع فرز الأحدث أولاً دائماً)                             */
-/* ---------------------------------------------------------------------- */
 const ADMIN_PRODUCTS_PAGE_SIZE = 40;
 let adminProductsShown = ADMIN_PRODUCTS_PAGE_SIZE;
 let adminProductsLastQuery = "";
@@ -1631,7 +1503,6 @@ function renderProductsTable() {
   let products = Store.getAdminProducts().filter(Boolean);
   if (query) products = products.filter(function (p) { return adminProductMatches(p, query); });
 
-  // فرز المنتجات تنازلياً ليظهر الأحدث إضافتاً أو تعديلاً أولاً دائماً
   products.sort((a, b) => {
     const timeA = Number(a.createdAt || a.updatedAt || 0);
     const timeB = Number(b.createdAt || b.updatedAt || 0);
@@ -1708,9 +1579,6 @@ function populateCategorySelect() {
   }).join("");
 }
 
-/* ---------------------------------------------------------------------- */
-/* إدارة الألوان والمقاسات والمودال                                       */
-/* ---------------------------------------------------------------------- */
 function currentSizesFromInput() {
   const input = document.getElementById("productSizes");
   if (!input) return [];
@@ -2067,7 +1935,6 @@ async function saveProductForm(e) {
     return;
   }
 
-  // تنقية الألوان واستبعاد أي لون شفاف أو قوام مائي
   const cleanColors = pendingColors
     .filter(function (c) { 
       return (c.name && c.name.trim() && !isTransparentOrInvalidColor(c.name)) || c.image; 
@@ -2193,9 +2060,6 @@ async function saveProductForm(e) {
   renderStats();
 }
 
-/* ---------------------------------------------------------------------- */
-/* جداول الأقسام والإعلانات والطلبات والإعدادات                            */
-/* ---------------------------------------------------------------------- */
 function renderCategoriesTable() {
   const tbody = document.getElementById("categoriesTableBody");
   if (!tbody) return;
