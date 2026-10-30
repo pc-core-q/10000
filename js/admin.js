@@ -1306,6 +1306,7 @@ function wireExcelSync() {
       const colorKeywords = ["لون", "ألوان", "الوان", "colors", "color"];
       const sizeKeywords = ["مقاس", "مقاسات", "حجم", "احجام", "سعة", "sizes", "size"];
       const descKeywords = ["مواصفات", "تفاصيل", "ملاحظات", "description"];
+      const imageKeywords = ["صورة", "صوره", "رابط الصورة", "رابط", "image", "img", "photo", "pic", "url"];
 
       // البحث عن السطر الذي يحتوي على أسماء الأعمدة (Header Row)
       let headerRowIdx = 0;
@@ -1356,6 +1357,7 @@ function wireExcelSync() {
         const colorCol = findKey(sampleRow, colorKeywords);
         const sizeCol = findKey(sampleRow, sizeKeywords);
         const descCol = findKey(sampleRow, descKeywords);
+        const imageCol = findKey(sampleRow, imageKeywords);
 
         if (nameCol) {
           rows.forEach(row => {
@@ -1369,6 +1371,7 @@ function wireExcelSync() {
             const descVal = descCol ? row[descCol]?.toString().trim() : "";
             const colorsRaw = colorCol ? row[colorCol] : null;
             const sizesRaw = sizeCol ? row[sizeCol] : null;
+            const imgVal = imageCol ? row[imageCol]?.toString().trim() : "";
 
             const cleanItemName = cleanNameForMatch(rawName);
             const existing = existingProducts.find(p =>
@@ -1397,14 +1400,14 @@ function wireExcelSync() {
               description: descVal || (existing ? existing.description : ""),
               colors: colorsList,
               sizes: sizesList,
-              image: existing ? existing.image : "",
+              image: imgVal || (existing ? existing.image : ""),
               existingId: existing ? existing.id : ""
             });
           });
         }
       }
 
-      // 2) إذا فشلت المطابقة المحلية (أعمدة غريبة أو ملف غير قياسي) -> إرسال للذكاء الاصطناعي فوراً
+      // 2) إذا فشلت المطابقة المحلية -> اللجوء للذكاء الاصطناعي فوراً
       if (!mappedItems.length) {
         showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
           "جارٍ تفريغ محتوى الملف واستيعاب سياق الجداول...",
@@ -1440,7 +1443,6 @@ function wireExcelSync() {
     }
   });
 }
-
 /* ---------------------------------------------------------------------- */
 /* رفع ومعالجة الصور عبر ImgBB و ImageKit CDN                             */
 /* ---------------------------------------------------------------------- */
