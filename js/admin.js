@@ -1267,7 +1267,7 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 4) استيراد ملفات الإكسل وعرضها أولاً داخل شاشة المراجعة التفاعلية       */
+/* 4) استيراد الإكسل الهجين الذكي (محلي فائق المرونة + دعم الذكاء الاصطناعي) */
 /* ---------------------------------------------------------------------- */
 function wireExcelSync() {
   const fileInput = document.getElementById("excelSyncInput") || document.querySelector('input[type="file"][accept=".xlsx, .xls, .csv"]');
@@ -1278,9 +1278,9 @@ function wireExcelSync() {
     const file = e.target.files[0];
     if (!file) return;
 
-    showProcessLoader("قراءة ملف الإكسل", [
-      "جارٍ فحص الجداول والأعمدة...",
-      "جارٍ مطابقة الأسماء والباركود والمخزون...",
+    showProcessLoader("قراءة وتحليل ملف الإكسل", [
+      "جارٍ فحص الجداول وبنية الأعمدة...",
+      "جارٍ مطابقة أسماء المواد والأسعار والمخزون...",
       "جارٍ تجهيز شاشة المراجعة..."
     ]);
 
@@ -1288,33 +1288,48 @@ function wireExcelSync() {
       const data = await file.arrayBuffer();
       const workbook = XLSX.read(data);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
-      if (rows.length === 0) {
+      // 1) تحويل الورقة إلى مصفوفة صفوف للبحث عن صف الترويسة الفعلي
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+      if (!rawRows || rawRows.length === 0) {
         hideProcessLoader();
-        showToast("الملف فارغ أو لا يحتوي على بيانات صالحة.", "error");
+        showToast("الملف فارغ أو لا يحتوي على بيانات.", "error");
         return;
       }
 
-      const getVal = (row, possibleKeys) => {
-        for (let key of possibleKeys) {
-          const foundKey = Object.keys(row).find(k => k.trim().toLowerCase() === key.toLowerCase());
-          if (foundKey && row[foundKey] !== "") return row[foundKey];
+      // قاموس شامل لمسميات الأعمدة التجارية الدارجة
+      const nameKeywords = ["اسم", "منتج", "مادة", "صنف", "بيان", "سلعة", "name", "item", "title", "product", "desc"];
+      const priceKeywords = ["سعر", "مفرد", "بيع", "مبلغ", "قيمة", "كلفة", "price", "rate", "cost", "unit"];
+      const stockKeywords = ["كمية", "عدد", "رصيد", "مخزون", "وارد", "qty", "quantity", "stock", "count"];
+      const barcodeKeywords = ["باركود", "كود", "رمز", "sku", "barcode", "code"];
+      const catKeywords = ["قسم", "تصنيف", "مجموعة", "نوع", "category", "cat", "group"];
+      const colorKeywords = ["لون", "ألوان", "الوان", "colors", "color"];
+      const sizeKeywords = ["مقاس", "مقاسات", "حجم", "احجام", "سعة", "sizes", "size"];
+      const descKeywords = ["مواصفات", "تفاصيل", "ملاحظات", "description"];
+
+      // البحث عن السطر الذي يحتوي على أسماء الأعمدة (Header Row)
+      let headerRowIdx = 0;
+      for (let r = 0; r < Math.min(rawRows.length, 10); r++) {
+        const rowStr = rawRows[r].map(c => String(c).toLowerCase()).join(" ");
+        const hasName = nameKeywords.some(k => rowStr.includes(k));
+        const hasPriceOrStock = priceKeywords.some(k => rowStr.includes(k)) || stockKeywords.some(k => rowStr.includes(k));
+        if (hasName && hasPriceOrStock) {
+          headerRowIdx = r;
+          break;
         }
-        return null;
+      }
+
+      // قراءة الصفوف بدءاً من صف الترويسة المكتشف
+      const rows = XLSX.utils.sheet_to_json(sheet, { range: headerRowIdx, defval: "" });
+
+      const findKey = (row, keywords) => {
+        return Object.keys(row).find(col => {
+          const cleanCol = col.trim().toLowerCase();
+          return keywords.some(k => cleanCol.includes(k));
+        });
       };
 
-      const barcodeKeys = ["الباركود", "باركود", "كود المادة", "كود", "barcode", "sku"];
-      const nameKeys = ["اسم المنتج", "الاسم", "المادة", "name"];
-      const priceKeys = ["السعر", "سعر البيع", "سعر المفرد", "price"];
-      const stockKeys = ["الكمية", "المخزون", "الرصيد", "stock", "qty"];
-      const categoryKeys = ["القسم", "التصنيف", "category"];
-      const descKeys = ["الوصف", "وصف", "description", "desc"];
-      const colorKeys = ["الألوان", "الالوان", "لون", "اللون", "colors", "color"];
-      const sizeKeys = ["المقاسات", "المقاس", "الاحجام", "الحجم", "sizes", "size"];
-      const imageKeys = ["الصورة", "صورة", "رابط الصورة", "image", "img"];
-
-      const parseCellNumber = (raw) => {
+      const parseNum = (raw) => {
         if (raw === null || raw === undefined || raw === "") return null;
         if (typeof raw === "number") return isFinite(raw) ? raw : null;
         const txt = String(raw)
@@ -1328,66 +1343,100 @@ function wireExcelSync() {
 
       const existingProducts = Store.getAdminProducts();
       const categories = Store.getCategories();
-      const mappedItems = [];
+      let mappedItems = [];
 
-      rows.forEach(row => {
-        const barcodeVal = getVal(row, barcodeKeys)?.toString().trim();
-        const nameVal = getVal(row, nameKeys)?.toString().trim();
-        let priceVal = parseCellNumber(getVal(row, priceKeys));
-        let stockVal = parseCellNumber(getVal(row, stockKeys));
-        const catVal = getVal(row, categoryKeys)?.toString().trim();
-        const descVal = getVal(row, descKeys)?.toString().trim();
-        const colorsRaw = getVal(row, colorKeys);
-        const sizesRaw = getVal(row, sizeKeys);
-        const imgVal = getVal(row, imageKeys)?.toString().trim();
+      // محاولة المطابقة المحلية المرنة أولاً
+      if (rows.length > 0) {
+        const sampleRow = rows[0];
+        const nameCol = findKey(sampleRow, nameKeywords);
+        const priceCol = findKey(sampleRow, priceKeywords);
+        const stockCol = findKey(sampleRow, stockKeywords);
+        const barcodeCol = findKey(sampleRow, barcodeKeywords);
+        const catCol = findKey(sampleRow, catKeywords);
+        const colorCol = findKey(sampleRow, colorKeywords);
+        const sizeCol = findKey(sampleRow, sizeKeywords);
+        const descCol = findKey(sampleRow, descKeywords);
 
-        if (!nameVal && !barcodeVal) return;
+        if (nameCol) {
+          rows.forEach(row => {
+            const rawName = row[nameCol]?.toString().trim();
+            if (!rawName) return;
 
-        const cleanItemName = cleanNameForMatch(nameVal);
-        const existing = existingProducts.find(p =>
-          (barcodeVal && (p.barcode === barcodeVal || p.sku === barcodeVal || p.id === barcodeVal)) ||
-          (p.name && cleanItemName && cleanNameForMatch(p.name) === cleanItemName)
-        );
+            const barcodeVal = barcodeCol ? row[barcodeCol]?.toString().trim() : "";
+            let priceVal = priceCol ? parseNum(row[priceCol]) : null;
+            let stockVal = stockCol ? parseNum(row[stockCol]) : null;
+            const catVal = catCol ? row[catCol]?.toString().trim() : "";
+            const descVal = descCol ? row[descCol]?.toString().trim() : "";
+            const colorsRaw = colorCol ? row[colorCol] : null;
+            const sizesRaw = sizeCol ? row[sizeCol] : null;
 
-        let matchedCatId = existing ? existing.categoryId : "";
-        if (!matchedCatId && catVal) {
-          const cleanSuggested = cleanNameForMatch(catVal);
-          const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
-          if (foundCat) matchedCatId = foundCat.id;
+            const cleanItemName = cleanNameForMatch(rawName);
+            const existing = existingProducts.find(p =>
+              (barcodeVal && (p.barcode === barcodeVal || p.sku === barcodeVal || p.id === barcodeVal)) ||
+              (p.name && cleanItemName && cleanNameForMatch(p.name) === cleanItemName)
+            );
+
+            let matchedCatId = existing ? existing.categoryId : "";
+            if (!matchedCatId && catVal) {
+              const cleanSuggested = cleanNameForMatch(catVal);
+              const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
+              if (foundCat) matchedCatId = foundCat.id;
+            }
+
+            const colorsList = colorsRaw ? String(colorsRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.colors ? existing.colors.map(c => c.name) : []);
+            const sizesList = sizesRaw ? String(sizesRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.sizes ? existing.sizes : []);
+
+            mappedItems.push({
+              name: rawName,
+              barcode: barcodeVal || (existing ? (existing.barcode || existing.sku) : ""),
+              price: priceVal !== null ? priceVal : (existing ? existing.price : 0),
+              stock: stockVal !== null ? Math.max(0, Math.floor(stockVal)) : 1,
+              currentStock: existing ? (Number(existing.stock) || 0) : null,
+              category: catVal || "",
+              categoryId: matchedCatId,
+              description: descVal || (existing ? existing.description : ""),
+              colors: colorsList,
+              sizes: sizesList,
+              image: existing ? existing.image : "",
+              existingId: existing ? existing.id : ""
+            });
+          });
         }
-
-        const colorsList = colorsRaw ? String(colorsRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.colors ? existing.colors.map(c => c.name) : []);
-        const sizesList = sizesRaw ? String(sizesRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.sizes ? existing.sizes : []);
-
-        mappedItems.push({
-          name: nameVal || (existing ? existing.name : "صنف بدون اسم"),
-          barcode: barcodeVal || (existing ? (existing.barcode || existing.sku) : ""),
-          price: priceVal !== null ? priceVal : (existing ? existing.price : 0),
-          stock: stockVal !== null ? Math.max(0, Math.floor(stockVal)) : 1,
-          currentStock: existing ? (Number(existing.stock) || 0) : null,
-          category: catVal || "",
-          categoryId: matchedCatId,
-          description: descVal || (existing ? existing.description : ""),
-          colors: colorsList,
-          sizes: sizesList,
-          image: imgVal || (existing ? existing.image : ""),
-          existingId: existing ? existing.id : ""
-        });
-      });
-
-      hideProcessLoader();
-
-      if (!mappedItems.length) {
-        showToast("لم يتم العثور على أي صفوف تطابق أعمدة الاسم أو الباركود.", "error");
-        return;
       }
 
+      // 2) إذا فشلت المطابقة المحلية (أعمدة غريبة أو ملف غير قياسي) -> إرسال للذكاء الاصطناعي فوراً
+      if (!mappedItems.length) {
+        showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
+          "جارٍ تفريغ محتوى الملف واستيعاب سياق الجداول...",
+          "جارٍ استخراج أسماء البضائع والأسعار والمقاسات بالذكاء الاصطناعي...",
+          "جارٍ مطابقة الأصناف وتجهيز شاشة المراجعة..."
+        ]);
+
+        const csvText = XLSX.utils.sheet_to_csv(sheet);
+        const base64Data = btoa(unescape(encodeURIComponent(csvText)));
+
+        const result = await window.StoreAI.scanInvoice(base64Data, "text/plain");
+        const rawItems = (result && result.items) ? result.items : [];
+
+        if (rawItems.length > 0) {
+          processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) ✨");
+          return;
+        } else {
+          hideProcessLoader();
+          showToast("لم يتمكن النظام من العثور على منتجات صالحة في هذا الملف.", "error");
+          return;
+        }
+      }
+
+      hideProcessLoader();
       renderBatchReviewCards(mappedItems, "مراجعة وتأكيد بيانات ملف الإكسل 📊");
       showToast(`تم استيراد ${mappedItems.length} صنف للمعاينة بنجاح`, "success");
     } catch (error) {
       hideProcessLoader();
       console.error("Excel import error:", error);
-      showToast("حدث خطأ أثناء قراءة ملف الإكسل.", "error");
+      showToast("حدث خطأ أثناء قراءة ملف الإكسل: " + error.message, "error");
+    } finally {
+      fileInput.value = "";
     }
   });
 }
