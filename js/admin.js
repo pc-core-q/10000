@@ -4,9 +4,10 @@
    تم التحديث: 
    1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
    2) دمج أدوات الإدخال إلى: "رفع صورة" (كاميرا أو معرض) و"رفع ملف" (PDF أو إكسل).
-   3) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
-   4) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
-   5) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
+   3) إرسال ملفات الإكسل مباشرة للذكاء الاصطناعي دون قيود على مسميات الأعمدة.
+   4) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
+   5) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
+   6) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -871,6 +872,52 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 }
 
 /* ---------------------------------------------------------------------- */
+/* معالجة ملفات الإكسل مباشرة عبر الذكاء الاصطناعي (AI Direct CSV Processing)*/
+/* ---------------------------------------------------------------------- */
+async function handleExcelFileWithAI(file) {
+  showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
+    "جارٍ قراءة وتفريغ جدول الإكسل...",
+    "جارٍ إرسال البيانات مباشرة إلى الذكاء الاصطناعي...",
+    "جارٍ استخراج الأصناف والأسعار والمخزون بذكاء...",
+    "جارٍ تجهيز شاشة المراجعة..."
+  ]);
+
+  try {
+    const data = await file.arrayBuffer();
+    const workbook = XLSX.read(data);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+    // تحويل الجدول إلى نص CSV مباشر متكامل
+    const csvText = XLSX.utils.sheet_to_csv(sheet);
+
+    if (!csvText || !csvText.trim()) {
+      hideProcessLoader();
+      showToast("ملف الإكسل فارغ أو لا يحتوي على بيانات.", "error");
+      return;
+    }
+
+    // تحويل النص إلى Base64 مع دعم كامل لحروف اللغة العربية
+    const base64Data = btoa(unescape(encodeURIComponent(csvText)));
+
+    // إرسال الملف مباشرة كنص إلى Gemini
+    const result = await window.StoreAI.scanInvoice(base64Data, "text/plain");
+    const rawItems = (result && result.items) ? result.items : [];
+
+    if (!rawItems.length) {
+      hideProcessLoader();
+      showToast("لم يتمكن الذكاء الاصطناعي من العثور على منتجات صالحة في هذا الملف.", "error");
+      return;
+    }
+
+    processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) 📊");
+  } catch (err) {
+    hideProcessLoader();
+    console.error("Excel AI import error:", err);
+    showToast("حدث خطأ أثناء معالجة ملف الإكسل: " + err.message, "error");
+  }
+}
+
+/* ---------------------------------------------------------------------- */
 /* 3) المعالجة الموحدة للوسائط الذكية (رفع صورة شاملة / رفع ملف مستند)     */
 /* ---------------------------------------------------------------------- */
 function wireSmartMediaScanner() {
@@ -968,17 +1015,14 @@ function wireSmartMediaScanner() {
 
       const fileName = file.name.toLowerCase();
 
-      // تحويل الإكسل لمعالج SheetJS
+      // معالجة الإكسل مباشرة عبر الذكاء الاصطناعي
       if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv")) {
-        const xlSyncInput = document.getElementById("excelSyncInput");
-        if (xlSyncInput) {
-          const dt = new DataTransfer();
-          dt.items.add(file);
-          xlSyncInput.files = dt.files;
-          xlSyncInput.dispatchEvent(new Event("change", { bubbles: true }));
+        try {
+          await handleExcelFileWithAI(file);
+        } finally {
           fileInput.value = "";
-          return;
         }
+        return;
       }
 
       // معالجة ملفات PDF مباشرة
@@ -1267,10 +1311,10 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* 4) استيراد الإكسل الهجين الذكي (محلي فائق المرونة + دعم الذكاء الاصطناعي) */
+/* 4) ربط زر استيراد الإكسل المباشر ليعمل بنفس دقة الذكاء الاصطناعي        */
 /* ---------------------------------------------------------------------- */
 function wireExcelSync() {
-  const fileInput = document.getElementById("excelSyncInput") || document.querySelector('input[type="file"][accept=".xlsx, .xls, .csv"]');
+  const fileInput = document.getElementById("excelSyncInput");
   if (!fileInput || fileInput.dataset.wired) return;
   fileInput.dataset.wired = "1";
 
@@ -1278,171 +1322,14 @@ function wireExcelSync() {
     const file = e.target.files[0];
     if (!file) return;
 
-    showProcessLoader("قراءة وتحليل ملف الإكسل", [
-      "جارٍ فحص الجداول وبنية الأعمدة...",
-      "جارٍ مطابقة أسماء المواد والأسعار والمخزون...",
-      "جارٍ تجهيز شاشة المراجعة..."
-    ]);
-
     try {
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-
-      // 1) تحويل الورقة إلى مصفوفة صفوف للبحث عن صف الترويسة الفعلي
-      const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-      if (!rawRows || rawRows.length === 0) {
-        hideProcessLoader();
-        showToast("الملف فارغ أو لا يحتوي على بيانات.", "error");
-        return;
-      }
-
-      // قاموس شامل لمسميات الأعمدة التجارية الدارجة
-      const nameKeywords = ["اسم", "منتج", "مادة", "صنف", "بيان", "سلعة", "name", "item", "title", "product", "desc"];
-      const priceKeywords = ["سعر", "مفرد", "بيع", "مبلغ", "قيمة", "كلفة", "price", "rate", "cost", "unit"];
-      const stockKeywords = ["كمية", "عدد", "رصيد", "مخزون", "وارد", "qty", "quantity", "stock", "count"];
-      const barcodeKeywords = ["باركود", "كود", "رمز", "sku", "barcode", "code"];
-      const catKeywords = ["قسم", "تصنيف", "مجموعة", "نوع", "category", "cat", "group"];
-      const colorKeywords = ["لون", "ألوان", "الوان", "colors", "color"];
-      const sizeKeywords = ["مقاس", "مقاسات", "حجم", "احجام", "سعة", "sizes", "size"];
-      const descKeywords = ["مواصفات", "تفاصيل", "ملاحظات", "description"];
-      const imageKeywords = ["صورة", "صوره", "رابط الصورة", "رابط", "image", "img", "photo", "pic", "url"];
-
-      // البحث عن السطر الذي يحتوي على أسماء الأعمدة (Header Row)
-      let headerRowIdx = 0;
-      for (let r = 0; r < Math.min(rawRows.length, 10); r++) {
-        const rowStr = rawRows[r].map(c => String(c).toLowerCase()).join(" ");
-        const hasName = nameKeywords.some(k => rowStr.includes(k));
-        const hasPriceOrStock = priceKeywords.some(k => rowStr.includes(k)) || stockKeywords.some(k => rowStr.includes(k));
-        if (hasName && hasPriceOrStock) {
-          headerRowIdx = r;
-          break;
-        }
-      }
-
-      // قراءة الصفوف بدءاً من صف الترويسة المكتشف
-      const rows = XLSX.utils.sheet_to_json(sheet, { range: headerRowIdx, defval: "" });
-
-      const findKey = (row, keywords) => {
-        return Object.keys(row).find(col => {
-          const cleanCol = col.trim().toLowerCase();
-          return keywords.some(k => cleanCol.includes(k));
-        });
-      };
-
-      const parseNum = (raw) => {
-        if (raw === null || raw === undefined || raw === "") return null;
-        if (typeof raw === "number") return isFinite(raw) ? raw : null;
-        const txt = String(raw)
-          .replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))
-          .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06F0))
-          .replace(/[\u066C,\s]/g, "")
-          .replace(/\u066B/g, ".");
-        const n = parseFloat(txt);
-        return isFinite(n) ? n : null;
-      };
-
-      const existingProducts = Store.getAdminProducts();
-      const categories = Store.getCategories();
-      let mappedItems = [];
-
-      // محاولة المطابقة المحلية المرنة أولاً
-      if (rows.length > 0) {
-        const sampleRow = rows[0];
-        const nameCol = findKey(sampleRow, nameKeywords);
-        const priceCol = findKey(sampleRow, priceKeywords);
-        const stockCol = findKey(sampleRow, stockKeywords);
-        const barcodeCol = findKey(sampleRow, barcodeKeywords);
-        const catCol = findKey(sampleRow, catKeywords);
-        const colorCol = findKey(sampleRow, colorKeywords);
-        const sizeCol = findKey(sampleRow, sizeKeywords);
-        const descCol = findKey(sampleRow, descKeywords);
-        const imageCol = findKey(sampleRow, imageKeywords);
-
-        if (nameCol) {
-          rows.forEach(row => {
-            const rawName = row[nameCol]?.toString().trim();
-            if (!rawName) return;
-
-            const barcodeVal = barcodeCol ? row[barcodeCol]?.toString().trim() : "";
-            let priceVal = priceCol ? parseNum(row[priceCol]) : null;
-            let stockVal = stockCol ? parseNum(row[stockCol]) : null;
-            const catVal = catCol ? row[catCol]?.toString().trim() : "";
-            const descVal = descCol ? row[descCol]?.toString().trim() : "";
-            const colorsRaw = colorCol ? row[colorCol] : null;
-            const sizesRaw = sizeCol ? row[sizeCol] : null;
-            const imgVal = imageCol ? row[imageCol]?.toString().trim() : "";
-
-            const cleanItemName = cleanNameForMatch(rawName);
-            const existing = existingProducts.find(p =>
-              (barcodeVal && (p.barcode === barcodeVal || p.sku === barcodeVal || p.id === barcodeVal)) ||
-              (p.name && cleanItemName && cleanNameForMatch(p.name) === cleanItemName)
-            );
-
-            let matchedCatId = existing ? existing.categoryId : "";
-            if (!matchedCatId && catVal) {
-              const cleanSuggested = cleanNameForMatch(catVal);
-              const foundCat = categories.find(c => cleanNameForMatch(c.name) === cleanSuggested || cleanNameForMatch(c.name).includes(cleanSuggested));
-              if (foundCat) matchedCatId = foundCat.id;
-            }
-
-            const colorsList = colorsRaw ? String(colorsRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.colors ? existing.colors.map(c => c.name) : []);
-            const sizesList = sizesRaw ? String(sizesRaw).split(/[,،/|]/).map(s => s.trim()).filter(Boolean) : (existing && existing.sizes ? existing.sizes : []);
-
-            mappedItems.push({
-              name: rawName,
-              barcode: barcodeVal || (existing ? (existing.barcode || existing.sku) : ""),
-              price: priceVal !== null ? priceVal : (existing ? existing.price : 0),
-              stock: stockVal !== null ? Math.max(0, Math.floor(stockVal)) : 1,
-              currentStock: existing ? (Number(existing.stock) || 0) : null,
-              category: catVal || "",
-              categoryId: matchedCatId,
-              description: descVal || (existing ? existing.description : ""),
-              colors: colorsList,
-              sizes: sizesList,
-              image: imgVal || (existing ? existing.image : ""),
-              existingId: existing ? existing.id : ""
-            });
-          });
-        }
-      }
-
-      // 2) إذا فشلت المطابقة المحلية -> اللجوء للذكاء الاصطناعي فوراً
-      if (!mappedItems.length) {
-        showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
-          "جارٍ تفريغ محتوى الملف واستيعاب سياق الجداول...",
-          "جارٍ استخراج أسماء البضائع والأسعار والمقاسات بالذكاء الاصطناعي...",
-          "جارٍ مطابقة الأصناف وتجهيز شاشة المراجعة..."
-        ]);
-
-        const csvText = XLSX.utils.sheet_to_csv(sheet);
-        const base64Data = btoa(unescape(encodeURIComponent(csvText)));
-
-        const result = await window.StoreAI.scanInvoice(base64Data, "text/plain");
-        const rawItems = (result && result.items) ? result.items : [];
-
-        if (rawItems.length > 0) {
-          processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) ✨");
-          return;
-        } else {
-          hideProcessLoader();
-          showToast("لم يتمكن النظام من العثور على منتجات صالحة في هذا الملف.", "error");
-          return;
-        }
-      }
-
-      hideProcessLoader();
-      renderBatchReviewCards(mappedItems, "مراجعة وتأكيد بيانات ملف الإكسل 📊");
-      showToast(`تم استيراد ${mappedItems.length} صنف للمعاينة بنجاح`, "success");
-    } catch (error) {
-      hideProcessLoader();
-      console.error("Excel import error:", error);
-      showToast("حدث خطأ أثناء قراءة ملف الإكسل: " + error.message, "error");
+      await handleExcelFileWithAI(file);
     } finally {
       fileInput.value = "";
     }
   });
 }
+
 /* ---------------------------------------------------------------------- */
 /* رفع ومعالجة الصور عبر ImgBB و ImageKit CDN                             */
 /* ---------------------------------------------------------------------- */
