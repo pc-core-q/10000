@@ -13,6 +13,8 @@
 
 const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b";
+// نموذج «الإثراء» (بحث Google + مخطط JSON). الجمع بينهما موثّق لنماذج Gemini 3. غيّره بـ GEMINI_ENRICH_MODEL إن لم يتوفر لحسابك.
+const DEFAULT_ENRICH_MODEL = "gemini-3.5-flash";
 
 const LIMITS = {
   prompt: 40000,          // أحرف
@@ -29,9 +31,9 @@ const HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Cont
 const ok = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: HEADERS });
 const fail = (status, error, code) => new Response(JSON.stringify({ error, code: code || "error" }), { status, headers: HEADERS });
 
-async function fetchWithTimeout(url, init) {
+async function fetchWithTimeout(url, init, ms) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), LIMITS.timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), ms || LIMITS.timeoutMs);
   try { return await fetch(url, Object.assign({}, init, { signal: ctrl.signal })); }
   finally { clearTimeout(timer); }
 }
@@ -257,6 +259,187 @@ async function groqChat(payload, env) {
   return ok({ ok: true, result: text });
 }
 
+/* ------------------------------ إثراء المنتج ببحث Google (Gemini + Grounding) ------------------------------ */
+async function geminiSearch(payload, env) {
+  const key = (env.GEMINI_API_KEY || "").trim();
+  if (!key) return fail(500, "GEMINI_API_KEY غير مضبوط في متغيرات بيئة Cloudflare.", "no_gemini_key");
+  const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+  if (!prompt || prompt.length > LIMITS.prompt) return fail(400, "نص التعليمات مفقود أو طويل جداً.", "bad_prompt");
+
+  const schema = validSchema(payload.schema);
+  const model = (env.GEMINI_ENRICH_MODEL || DEFAULT_ENRICH_MODEL).trim();
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent";
+  const call = (useSchema) => fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      tools: [{ google_search: {} }],
+      // لا نضبط temperature: وثائق Gemini 3 توصي بالقيمة الافتراضية
+      generationConfig: useSchema ? { responseMimeType: "application/json", responseJsonSchema: schema } : { maxOutputTokens: 8192 }
+    })
+  }, 50000);
+
+  let res, data;
+  try {
+    res = await call(!!schema);
+    data = await res.json().catch(() => null);
+    const msg0 = (data && data.error && data.error.message) || "";
+    if (schema && res.status === 400 && /schema|response|mime/i.test(msg0)) {   // الجمع غير مدعوم ← نعتمد على الموجّه ونحلل JSON بأنفسنا
+      res = await call(false);
+      data = await res.json().catch(() => null);
+    }
+  } catch (e) {
+    return fail(504, "انتهت مهلة البحث. أعد المحاولة.", "gemini_timeout");
+  }
+  if (!res.ok || !data || data.error) {
+    const msg = (data && data.error && data.error.message) || "";
+    if (res.status === 429) return fail(429, "تجاوزت حد الطلبات لدى Gemini. انتظر دقيقة ثم أعد المحاولة.", "gemini_error");
+    if (res.status === 400 && /tool|search|ground/i.test(msg)) return fail(422, "النموذج «" + model + "» لا يدعم البحث في Google لحسابك. عيّن GEMINI_ENRICH_MODEL بنموذج يدعمه.", "no_grounding");
+    return fail(502, msg || "خطأ من Gemini (" + res.status + ")", "gemini_error");
+  }
+  const cand = data.candidates && data.candidates[0];
+  const text = ((cand && cand.content && cand.content.parts) || [])
+    .filter(p => p && typeof p.text === "string" && !p.thought).map(p => p.text).join("");
+  if (!text.trim()) return fail(502, "لم يرجع Gemini أي نتيجة.", "empty");
+  const parsed = extractJson(text);
+  if (!parsed || parsed.partial) return fail(502, "رد البحث ليس JSON صالحاً.", "bad_json");
+
+  // المصادر الفعلية التي استند إليها البحث (لا ما يكتبه النموذج): إن لم توجد فالرد غير مُؤسَّس ولا يُعتمد
+  const chunks = (cand && cand.groundingMetadata && cand.groundingMetadata.groundingChunks) || [];
+  const seen = new Set(), sources = [];
+  chunks.forEach(c => {
+    const w = c && c.web;
+    if (w && typeof w.uri === "string" && !seen.has(w.uri) && sources.length < 6) { seen.add(w.uri); sources.push({ uri: w.uri, title: String(w.title || "").slice(0, 120) }); }
+  });
+  return ok({ ok: true, data: parsed.value, sources, grounded: sources.length > 0, model });
+}
+
+/* ------------------------------ إيجاد صورة المنتج من صفحات المصادر ------------------------------ */
+// الخادم يختار رابط الصورة فقط ويتحقق منه؛ رفعها إلى ImgBB يتم من المتصفح عبر uploadToImgBB (ImgBB يقبل رابطاً مباشراً)
+const BLOCKED_HOST = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.lan)$/i;
+function publicUrl(u) {
+  let url;
+  try { url = new URL(u); } catch (e) { return null; }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password) return null;
+  if (url.port && url.port !== "80" && url.port !== "443") return null;
+  const h = url.hostname.toLowerCase();
+  if (BLOCKED_HOST.test(h) || h.startsWith("[") || h.includes(":")) return null;
+  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    if (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return null;
+  } else if (!h.includes(".")) return null;
+  return url;
+}
+
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "Accept-Language": "ar,en;q=0.8"
+};
+
+// يتبع التحويلات يدوياً ويفحص كل قفزة (منع SSRF: لا شبكات داخلية ولا منافذ غريبة)
+async function fetchPublic(startUrl, headers, ms) {
+  let cur = startUrl;
+  for (let hop = 0; hop < 5; hop++) {
+    const u = publicUrl(cur);
+    if (!u) throw new Error("blocked_url");
+    const res = await fetchWithTimeout(u.href, { method: "GET", redirect: "manual", headers: Object.assign({}, BROWSER_HEADERS, headers || {}) }, ms || 8000);
+    const loc = res.headers.get("location");
+    if (res.status >= 300 && res.status < 400 && loc) { try { res.body && res.body.cancel && res.body.cancel(); } catch (e) {} cur = new URL(loc, u.href).href; continue; }
+    return { res, finalUrl: u.href };
+  }
+  throw new Error("too_many_redirects");
+}
+
+async function readTextCapped(res, maxBytes) {
+  if (!res.body || !res.body.getReader) return (await res.text()).slice(0, maxBytes);
+  const reader = res.body.getReader(), dec = new TextDecoder("utf-8", { fatal: false });
+  let out = "", total = 0;
+  while (total < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length; out += dec.decode(value, { stream: true });
+  }
+  try { await reader.cancel(); } catch (e) {}
+  return out;
+}
+
+const BAD_IMG = /(logo|favicon|sprite|placeholder|blank|spacer|default[-_]?(image|share)|avatar|icon[-_.])/i;
+function collectLdImages(node, out) {
+  if (!node) return;
+  if (Array.isArray(node)) { node.forEach(n => collectLdImages(n, out)); return; }
+  if (typeof node !== "object") return;
+  const t = [].concat(node["@type"] || []).map(String);
+  if (t.some(x => /product/i.test(x)) && node.image) {
+    [].concat(node.image).forEach(im => { if (typeof im === "string") out.push(im); else if (im && typeof im.url === "string") out.push(im.url); });
+  }
+  if (node["@graph"]) collectLdImages(node["@graph"], out);
+  if (node.mainEntity) collectLdImages(node.mainEntity, out);
+}
+function extractImageCandidates(html, baseUrl) {
+  const raw = [];
+  (html.match(/<script[^>]+application\/ld\+json[^>]*>[\s\S]*?<\/script>/gi) || []).forEach(block => {
+    const body = block.replace(/^<script[^>]*>/i, "").replace(/<\/script>$/i, "");
+    try { collectLdImages(JSON.parse(body), raw); } catch (e) {}
+  });
+  (html.match(/<meta\s[^>]*>/gi) || []).forEach(tag => {
+    const key = (tag.match(/(?:property|name)\s*=\s*["']([^"']+)["']/i) || [])[1];
+    const content = (tag.match(/content\s*=\s*["']([^"']+)["']/i) || [])[1];
+    if (key && content && /^(og:image(:secure_url)?|twitter:image(:src)?)$/i.test(key)) raw.push(content.replace(/&amp;/g, "&"));
+  });
+  const link = (html.match(/<link[^>]+rel=["']image_src["'][^>]*>/i) || [])[0];
+  if (link) { const h = (link.match(/href\s*=\s*["']([^"']+)["']/i) || [])[1]; if (h) raw.push(h); }
+  const out = [], seen = new Set();
+  raw.forEach(c => {
+    let abs; try { abs = new URL(c, baseUrl).href; } catch (e) { return; }
+    if (!publicUrl(abs) || BAD_IMG.test(abs) || seen.has(abs)) return;
+    seen.add(abs); out.push(abs);
+  });
+  return out.slice(0, 6);
+}
+
+// يتأكد أن الرابط صورة حقيقية (jpeg/png/webp) بحجم معقول دون تنزيلها كاملة
+async function verifyImage(url) {
+  try {
+    const { res } = await fetchPublic(url, { Range: "bytes=0-1023", Accept: "image/*" }, 8000);
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const range = (res.headers.get("content-range") || "").match(/\/(\d+)$/);
+    const total = range ? +range[1] : +(res.headers.get("content-length") || 0);
+    try { res.body && res.body.cancel && res.body.cancel(); } catch (e) {}
+    if (!(res.status === 200 || res.status === 206)) return false;
+    if (!/^image\/(jpeg|jpg|png|webp)/.test(ct)) return false;
+    if (total && (total < 6000 || total > 15 * 1024 * 1024)) return false;      // أيقونات/شعارات صغيرة أو ملفات ضخمة
+    return true;
+  } catch (e) { return false; }
+}
+
+async function resolveImage(payload) {
+  const urls = Array.isArray(payload.urls) ? payload.urls.filter(u => typeof u === "string").slice(0, 3) : [];
+  if (!urls.length) return fail(400, "لا توجد روابط مصادر.", "no_urls");
+  let verifications = 0;
+  for (const pageUrl of urls) {
+    let fetched;
+    try { fetched = await fetchPublic(pageUrl, { Accept: "text/html,application/xhtml+xml,image/*" }, 9000); } catch (e) { continue; }
+    const { res, finalUrl } = fetched;
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (!res.ok) { try { res.body && res.body.cancel && res.body.cancel(); } catch (e) {} continue; }
+    if (ct.startsWith("image/")) {                       // الرابط نفسه صورة
+      try { res.body && res.body.cancel && res.body.cancel(); } catch (e) {}
+      if (++verifications <= 8 && await verifyImage(finalUrl)) return ok({ ok: true, imageUrl: finalUrl, from: finalUrl });
+      continue;
+    }
+    if (!/html/.test(ct)) { try { res.body && res.body.cancel && res.body.cancel(); } catch (e) {} continue; }
+    const html = await readTextCapped(res, 400000);
+    for (const cand of extractImageCandidates(html, finalUrl)) {
+      if (++verifications > 8) break;
+      if (await verifyImage(cand)) return ok({ ok: true, imageUrl: cand, from: finalUrl });
+    }
+  }
+  return fail(404, "لم أجد صورة صالحة في المصادر.", "no_image");
+}
+
 /* ------------------------------ نقطة الدخول ------------------------------ */
 export async function onRequestPost(context) {
   try {
@@ -271,6 +454,8 @@ export async function onRequestPost(context) {
 
     if (action === "gemini_vision") return await geminiVision(payload, env);
     if (action === "groq_chat") return await groqChat(payload, env);
+    if (action === "gemini_search") return await geminiSearch(payload, env);
+    if (action === "resolve_image") return await resolveImage(payload);
     return fail(400, "إجراء غير معروف.", "bad_action");
   } catch (err) {
     return fail(500, "خطأ غير متوقع في الخادم.", "internal");

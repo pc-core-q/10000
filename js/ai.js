@@ -9,6 +9,8 @@ const StoreAI = (() => {
   // مفاتيح config.js: aiEnabled (افتراضي true) و aiBilingualNames (افتراضي true). غير معرّفة (اختبارات) ← الافتراضي.
   const cfg = () => (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG) ? STORE_CONFIG : {};
   const aiEnabled = () => cfg().aiEnabled !== false;
+  const enrichEnabled = () => cfg().aiEnrich !== false;
+  const enrichMax = () => { const n = Number(cfg().aiEnrichMax); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 40; };
   const bilingualNames = () => cfg().aiBilingualNames !== false;
   function assertEnabled() {
     if (!aiEnabled()) throw new Error("أدوات الذكاء الاصطناعي معطّلة لهذا المتجر (aiEnabled في config.js).");
@@ -488,11 +490,140 @@ const StoreAI = (() => {
     return { products, partial: !!resp.partial };
   }
 
+  /* ------------------------------ 6) إثراء المنتجات ببحث Google (وصف/ألوان/مقاسات/صورة/قسم) ------------------------------ */
+  // ملف المبيعات يحوي غالباً الاسم والكود والسعر والعدد فقط. هنا يبحث Gemini (Grounding) عن المنتج الحقيقي ويُكمل الناقص.
+  // قواعد الدقة: (1) لا يُعتمد أي رد غير مؤسَّس على مصادر بحث فعلية (يرجعها الخادم من groundingMetadata لا من كلام النموذج)،
+  // (2) الثقة المنخفضة أو «لم يُعثر على المنتج» ← تُترك الحقول فارغة بدل التخمين، (3) لا نستبدل ما كتبه التاجر (الاسم الرسمي يُعرض كاقتراح).
+  const ENRICH_SCHEMA = {
+    type: "object",
+    properties: {
+      found: { type: "boolean" },
+      confidence: { type: "string", enum: ["high", "medium", "low"] },
+      officialName: STR, brand: STR, productType: STR,
+      category: STR, suggestedCategory: STR,
+      description: STR,
+      colors: { type: "array", items: STR }, sizes: { type: "array", items: STR }
+    },
+    required: ["found", "confidence", "officialName", "brand", "productType", "category", "suggestedCategory", "description", "colors", "sizes"]
+  };
+
+  function buildEnrichPrompt(item, categories) {
+    const cats = (categories || []).map(catLabel).filter(Boolean);
+    const nameRule = bilingualNames()
+      ? "الاسم الرسمي الكامل للمنتج بصيغة \"الاسم بالعربي / Official English Name\" (الاسم التجاري الرسمي كما تعرضه الشركة المصنّعة)"
+      : "الاسم الرسمي الكامل للمنتج كما تعرضه الشركة المصنّعة وبلغته الأصلية دون ترجمة";
+    return [
+      "ابحث في الإنترنت (Google) عن المنتج التالي المعروض في متجر، وحدّد صفحته الرسمية أو صفحات متاجر معتمدة، ثم أكمل بياناته.",
+      "اسم المنتج كما في ملف التاجر: «" + cleanText(item.name, 200) + "»",
+      item.barcode ? "الباركود/الكود: " + item.barcode : "",
+      "أقسام المتجر الحالية (الفرعي بصيغة «الأب › الفرعي»): [" + cats.join("، ") + "]",
+      "",
+      "قواعد الدقة الصارمة (الأهم):",
+      "- found=true فقط إن وجدت **المنتج نفسه** (الماركة والنوع والحجم/الإصدار) في مصادر البحث. إن لم تجده أو التبس بمنتج مشابه فـ found=false وكل الحقول النصية \"\" والمصفوفات [] — لا تخمّن من اسم مشابه ولا من معرفتك السابقة.",
+      "- confidence: high إن طابقت المصادر المنتج تماماً، medium إن طابقت جزئياً مع تأكيد النوع والماركة، low عند أي شك.",
+      "- ممنوع اختراع مكوّنات أو ألوان أو أحجام أو نسب أو ادعاءات لم ترد في المصادر.",
+      "",
+      "الحقول:",
+      "1. officialName: " + nameRule + ".",
+      "2. brand: الماركة. productType: نوع المنتج بكلمتين أو ثلاث (مثل: شامبو، كريم أساس، هاتف ذكي).",
+      "3. category: **انسخ حرفياً** من قائمة الأقسام بهذا الترتيب: (أ) قسم يطابق نوع المنتج (شامبو ← «العناية بالشعر»)، وإلا (ب) قسم باسم ماركة المنتج، وإلا اتركه \"\". لا تنشئ اسم قسم هنا.",
+      "4. suggestedCategory: فقط إن كان category فارغاً — اسم قسم عربي موجز مناسب لنوع المنتج، وإلا \"\".",
+      "5. description: وصف إعلاني جذاب بالعربية (جملتان إلى ثلاث) مبني **فقط** على مواصفات وردت في المصادر (الفوائد، المكوّنات الرئيسية، السعة…). بلا سعر، بلا إيموجي، وبلا ادعاءات طبية أو علاجية ما لم ترد رسمياً.",
+      "6. colors: الألوان/الدرجات الرسمية المتوفرة للمنتج كخيارات شراء كما تعرضها المصادر، وإلا []. كلمات القوام (شفاف/مائي/جل/سائل) ليست ألواناً.",
+      "7. sizes: الأحجام/السعات/المقاسات الرسمية المتوفرة كخيارات (\"50ml\"، \"256GB\"، \"S\")، وإلا []. أضف الحجم المذكور في الاسم إن وُجد.",
+      "",
+      "أرجع JSON فقط بلا أي نص آخر."
+    ].filter(x => x !== "").join("\n");
+  }
+
+  // يطبّق نتيجة البحث على المنتج (دالة صافية قابلة للاختبار). لا تستبدل الموجود؛ تكمل الناقص فقط.
+  function applyEnrichment(item, result, categories) {
+    const out = Object.assign({}, item);
+    const d = (result && result.data) || {};
+    const sources = Array.isArray(result && result.sources) ? result.sources : [];
+    const grounded = !!(result && result.grounded) && sources.length > 0;
+    let state = "notfound";
+    if (grounded && d.found === true) state = ["high", "medium", "low"].includes(d.confidence) ? d.confidence : "low";
+    const meta = { state, officialName: "", sources: sources.slice(0, 3).map(x => ({ uri: cleanText(x.uri, 500), title: cleanText(x.title, 80) })), webImage: false, addedVariants: false };
+    out.enriched = meta;
+    if (state !== "high" && state !== "medium") return out;      // لم يُعثر عليه / ثقة منخفضة ← لا نملأ شيئاً
+
+    meta.officialName = cleanText(d.officialName, 200);
+    if (!out.description) out.description = cleanText(d.description, 1200);
+    const colors = toList(d.colors, 20, 30).filter(c => !/^(شفاف|شفافة|مائي|مائية|عديم اللون|clear|transparent|جل|سائل)$/i.test(c));
+    if (!(out.colors && out.colors.length) && colors.length) { out.colors = colors; meta.addedVariants = true; }
+    const sizes = toList(d.sizes, 20, 30);
+    if (!(out.sizes && out.sizes.length) && sizes.length) { out.sizes = sizes; meta.addedVariants = true; }
+
+    // القسم: (1) نوع المنتج ← (2) ماركته ← (3) اقتراح (النموذج رتّب ذلك؛ نتحقق أن النص من قائمة المتجر فعلاً)
+    const resolved = d.category ? resolveCategoryName(d.category, categories) : null;
+    if (resolved) out.category = resolved;
+    else if (cleanText(d.suggestedCategory, 60)) out.category = cleanText(d.suggestedCategory, 60);
+    return out;
+  }
+
+  // opts: { skip(item)→bool, uploadImage(url)→Promise<cdnUrl>, onProgress(done,total), concurrency }
+  async function enrichItems(items, categories = [], opts = {}) {
+    assertEnabled();
+    const warnings = [];
+    const list = Array.isArray(items) ? items.slice() : [];
+    if (!enrichEnabled() || !list.length) return { items: list, warnings };
+
+    const targets = [];
+    list.forEach((it, i) => { if (!(opts.skip && opts.skip(it))) targets.push(i); });
+    const max = enrichMax();
+    const run = targets.slice(0, max);
+    if (targets.length > max) warnings.push("أُثري أول " + max + " منتجاً فقط من " + targets.length + " (الحد aiEnrichMax). الباقي بلا إثراء — استعمل «إكمال بيانات المنتجات الناقصة» لاحقاً.");
+
+    let done = 0, cursor = 0, stop = false, notFound = 0, lowConf = 0, imgFail = 0, imgOk = 0, failed = 0;
+    const total = run.length;
+    if (opts.onProgress) opts.onProgress(0, total);
+
+    const worker = async () => {
+      while (!stop && cursor < run.length) {
+        const idx = run[cursor++];
+        const item = list[idx];
+        try {
+          const res = await callServerApi("gemini_search", { prompt: buildEnrichPrompt(item, categories), schema: ENRICH_SCHEMA });
+          let enriched = applyEnrichment(item, res, categories);
+          const st = enriched.enriched.state;
+          if (st === "notfound") notFound++; else if (st === "low") lowConf++;
+          if ((st === "high" || st === "medium") && !enriched.image && enriched.enriched.sources.length) {
+            try {
+              const urls = (res.sources || []).map(x => x.uri).filter(Boolean).slice(0, 3);
+              const img = await callServerApi("resolve_image", { urls });
+              let finalUrl = img && img.imageUrl;
+              if (finalUrl && opts.uploadImage) finalUrl = await opts.uploadImage(finalUrl);   // ImgBB ← ImageKit بنفس مسار الصورة المفردة
+              if (finalUrl) { enriched.image = finalUrl; enriched.enriched.webImage = true; imgOk++; } else imgFail++;
+            } catch (e) { imgFail++; }
+          }
+          list[idx] = enriched;
+        } catch (e) {
+          failed++;
+          if (e && /no_grounding|لا يدعم البحث|auth_not_configured|غير مضبوط|غير موجودة على هذه الاستضافة|سجّل الدخول|غير مصرّح/.test(e.message || "")) {
+            stop = true;       // خطأ إعداد: لا فائدة من تكرار الطلبات
+            warnings.push("توقف الإثراء: " + e.message);
+          }
+        }
+        done++;
+        if (opts.onProgress) opts.onProgress(done, total);
+      }
+    };
+    const n = Math.max(1, Math.min(opts.concurrency || 3, 4));
+    await Promise.all(Array.from({ length: n }, worker));
+
+    if (notFound) warnings.push(notFound + " منتج لم يُعثر عليه بثقة في الإنترنت فتُرك بلا وصف/ألوان/مقاسات (أكملها يدوياً).");
+    if (lowConf) warnings.push(lowConf + " منتج بثقة منخفضة: لم تُملأ بياناته حفاظاً على الدقة.");
+    if (imgFail) warnings.push("تعذّر إيجاد/رفع صورة لـ " + imgFail + " منتج.");
+    if (failed && !stop) warnings.push("فشل إثراء " + failed + " منتج لخطأ مؤقت (أعد المحاولة بزر «إكمال بيانات المنتجات الناقصة»).");
+    return { items: list, warnings, stats: { total, imgOk, imgFail, notFound, lowConf, failed } };
+  }
+
   const api = {
     generateDescription, parsePriceCommand, scanShelf, scanInvoice,
     prepareImage, preparePdf,
     // للاختبارات وللاستعمال من admin.js
-    normalizeItems, normalizePricePlan, toNumber, splitCsvRows, cleanDescription, normKey, buildInvoicePrompt
+    normalizeItems, normalizePricePlan, toNumber, splitCsvRows, cleanDescription, normKey, buildInvoicePrompt, buildEnrichPrompt, applyEnrichment, enrichItems
   };
   return api;
 })();

@@ -416,6 +416,7 @@ async function initAdminPage() {
   applyAiAvailability();
   wireExcelSync();
   wireSmartMediaScanner();
+  wireCompleteMissing();
   wireAiPricing();
 
   wireProductsTableEvents();
@@ -806,6 +807,27 @@ function wireAiPricing() {
 /* ---------------------------------------------------------------------- */
 /* 2) النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة                   */
 /* ---------------------------------------------------------------------- */
+// شارات الإثراء في بطاقة المراجعة: الثقة، المصادر، تنبيه الصورة، اقتراح الاسم الرسمي، وتنبيه توزيع المخزون على الألوان/المقاسات
+function enrichBadgesHtml(item) {
+  const e = item && item.enriched;
+  if (!e) return "";
+  const labels = { high: "ثقة عالية", medium: "ثقة متوسطة — راجع البيانات", low: "ثقة منخفضة — لم تُملأ البيانات حفاظاً على الدقة", notfound: "لم يُعثر على المنتج في الإنترنت — أكمل بياناته يدوياً" };
+  const color = e.state === "high" ? "#15803d" : (e.state === "medium" ? "#b45309" : "#b91c1c");
+  const rows = ['<div style="font-size:0.75rem; color:' + color + '; font-weight:700;">🔎 ' + escapeHtml(labels[e.state] || "") + "</div>"];
+  if (e.sources && e.sources.length) {
+    rows.push('<div style="font-size:0.7rem; color:var(--text-2);">المصادر: ' + e.sources.map(function (src) {
+      return '<a href="' + escapeHtml(safeUrl(src.uri)) + '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);">' + escapeHtml(src.title || "مصدر") + "</a>";
+    }).join("، ") + "</div>");
+  }
+  if (e.webImage) rows.push('<div style="font-size:0.75rem; color:var(--text-2);">🖼️ الصورة من الإنترنت — راجعها قبل الحفظ</div>');
+  if (e.officialName && cleanNameForMatch(e.officialName) !== cleanNameForMatch(item.name)) {
+    rows.push('<div style="font-size:0.75rem;">الاسم الرسمي المقترح: <strong>' + escapeHtml(e.officialName) + '</strong> ' +
+      '<button type="button" class="btn-use-official" data-official-name="' + escapeHtml(e.officialName) + '" style="background:none; border:none; color:var(--primary); text-decoration:underline; cursor:pointer; font-size:0.75rem; padding:0; font-weight:600;">[استخدمه]</button></div>');
+  }
+  if (e.addedVariants) rows.push('<div style="font-size:0.72rem; color:#b45309;">⚠️ ألوان/مقاسات مقترحة من الإنترنت: سيُوزَّع المخزون بالتساوي عليها، عدّله من نافذة المنتج بعد الحفظ، أو امسح الحقل لتعطيلها.</div>');
+  return '<div class="shelf-enrich-box" style="display:flex; flex-direction:column; gap:3px; background:var(--surface-2, #f8fafc); border:1px dashed var(--line-strong); border-radius:6px; padding:6px 8px;">' + rows.join("") + "</div>";
+}
+
 function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد البضائع المستخرجة 📦") {
   const modal = document.getElementById("shelfScanModal");
   const container = document.getElementById("shelfDetectedList");
@@ -886,6 +908,8 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
           <input type="file" accept="image/*" class="shelf-card-file" style="display:none;">
         </label>
       </div>
+
+      ${enrichBadgesHtml(item)}
 
       <input type="text" class="shelf-item-name" value="${escapeHtml(initialName)}" placeholder="اسم المنتج الأساسي" style="padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-weight:600;">
       
@@ -978,6 +1002,15 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
           const chip = card.querySelector(".suggested-cat-chip");
           if (chip) chip.remove();
         }
+      });
+    }
+
+    const btnOfficial = card.querySelector(".btn-use-official");
+    if (btnOfficial) {
+      btnOfficial.addEventListener("click", () => {
+        const nm = card.querySelector(".shelf-item-name");
+        if (nm) { nm.value = btnOfficial.getAttribute("data-official-name") || nm.value; nm.dispatchEvent(new Event("input", { bubbles: true })); }
+        btnOfficial.parentElement.style.display = "none";
       });
     }
 
@@ -1108,7 +1141,7 @@ async function handleExcelFileWithAI(file) {
       return;
     }
 
-    processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) 📊", warnings);
+    await enrichAndOpen(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) 📊", warnings);
   } catch (err) {
     hideProcessLoader();
     console.error("Excel AI import error:", err);
@@ -1180,7 +1213,7 @@ function wireSmartMediaScanner() {
           return;
         }
 
-        processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من الصورة 🖼️", result.warnings);
+        await enrichAndOpen(rawItems, "المنتجات المستخرجة من الصورة 🖼️", result.warnings);
       } catch (err) {
         hideProcessLoader();
         console.error(err);
@@ -1237,7 +1270,7 @@ function wireSmartMediaScanner() {
             return;
           }
 
-          processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الفاتورة (PDF) 📄", result.warnings);
+          await enrichAndOpen(rawItems, "المنتجات المستخرجة من ملف الفاتورة (PDF) 📄", result.warnings);
         } catch (err) {
           hideProcessLoader();
           console.error(err);
@@ -1490,19 +1523,47 @@ function wireSmartMediaScanner() {
 }
 
 // دالة توحيد المطابقة وفتح شاشة المراجعة (مع تنقية وتثبيت روابط الصور ومطابقة الأقسام)
+// المنتج الموجود في المتجر المطابق لسطر مستورد: بالباركود أولاً ثم بالاسم بعد التوحيد
+function findExistingFor(item, existingProducts) {
+  const cleanItemName = cleanNameForMatch(item.name);
+  return (existingProducts || []).find(p => {
+    if (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) return true;
+    return !!(p.name && cleanItemName && cleanNameForMatch(p.name) === cleanItemName);
+  });
+}
+
+// يكمل بيانات المنتجات الناقصة من الإنترنت (وصف، ألوان، مقاسات، صورة، قسم) ثم يفتح نافذة المراجعة.
+// aiEnrich:false في config.js ← يفتح المراجعة مباشرة. أي فشل في الإثراء لا يوقف الاستيراد (يظهر تحذير فقط).
+async function enrichAndOpen(rawItems, modalTitle, warnings) {
+  const warn = Array.isArray(warnings) ? warnings.slice() : [];
+  const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
+  let items = rawItems;
+  if (cfg.aiEnabled !== false && cfg.aiEnrich !== false && window.StoreAI && typeof window.StoreAI.enrichItems === "function") {
+    const existing = Store.getAdminProducts();
+    try {
+      showProcessLoader("جارٍ إكمال بيانات المنتجات من الإنترنت 🔎", ["جارٍ البحث عن المنتجات الرسمية وصورها..."]);
+      const res = await window.StoreAI.enrichItems(rawItems, categoryLabels(), {
+        // لا نبحث عمّا هو كامل أصلاً (منتج موجود بوصف وصورة، أو سطر مستورد جاء بوصف وصورة)
+        skip: it => { const ex = findExistingFor(it, existing); return !!(ex && ex.image && ex.description) || !!(it.description && it.image); },
+        uploadImage: url => uploadToImgBB(url, false),
+        onProgress: (d, t) => showProcessLoader("جارٍ إكمال بيانات المنتجات من الإنترنت 🔎", ["جارٍ البحث عن المنتجات الرسمية وصورها: " + d + " من " + t])
+      });
+      items = res.items;
+      warn.push.apply(warn, res.warnings || []);
+    } catch (e) {
+      console.error("enrich error:", e);
+      warn.push("تعذّر إكمال البيانات من الإنترنت: " + (e.message || e));
+    }
+  }
+  processAndOpenBatchReview(items, modalTitle, warn);
+}
+
 function processAndOpenBatchReview(rawItems, modalTitle, warnings) {
   const existingProducts = Store.getAdminProducts();
   const categories = Store.getCategories();
 
   const mappedItems = rawItems.map(item => {
-    const cleanItemName = cleanNameForMatch(item.name);
-    const existing = existingProducts.find(p => {
-      if (item.barcode && (p.barcode === item.barcode || p.sku === item.barcode)) return true;
-      if (p.name && cleanItemName) {
-        return cleanNameForMatch(p.name) === cleanItemName;
-      }
-      return false;
-    });
+    const existing = findExistingFor(item, existingProducts);
 
     let matchedCatId = existing ? existing.categoryId : "";
     if (!matchedCatId && item.category) {
@@ -1541,7 +1602,8 @@ function processAndOpenBatchReview(rawItems, modalTitle, warnings) {
       colors: filteredColors,
       sizes: (item.sizes && item.sizes.length) ? item.sizes : existingSizes,
       image: cleanImageUrl,
-      existingId: existing ? existing.id : ""
+      existingId: existing ? existing.id : "",
+      enriched: item.enriched || null
     };
   });
 
@@ -1561,6 +1623,37 @@ function processAndOpenBatchReview(rawItems, modalTitle, warnings) {
 /* ---------------------------------------------------------------------- */
 /* 4) ربط زر استيراد الإكسل المباشر ليعمل بنفس دقة الذكاء الاصطناعي        */
 /* ---------------------------------------------------------------------- */
+// منتجات المتجر الناقصة (بلا وصف أو بلا صورة) تُكمَّل بنفس مسار الإثراء، وتُراجَع قبل الحفظ. الكمية الواردة 0 فلا يتغير المخزون.
+function wireCompleteMissing() {
+  const btn = document.getElementById("btnCompleteMissing");
+  if (!btn || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
+  btn.addEventListener("click", async () => {
+    if (!window.StoreAI || typeof window.StoreAI.enrichItems !== "function") { showToast("ملف js/ai.js غير محمل", "error"); return; }
+    if (!ensureProductsWritable()) return;
+    if (!(await ensureFullCatalogForBulk())) return;
+    const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
+    const max = Number(cfg.aiEnrichMax) > 0 ? Math.floor(Number(cfg.aiEnrichMax)) : 40;
+    const cats = Store.getCategories();
+    const missing = Store.getProducts().filter(p => p && p.name && (!p.description || !p.image));
+    if (!missing.length) { showToast("كل المنتجات لديها وصف وصورة 🎉", "success"); return; }
+    const batch = missing.slice(0, max);
+    if (!confirm("يوجد " + missing.length + " منتج ناقص (بلا وصف أو صورة).\nسيُبحث عن " + batch.length + " منتج الآن في الإنترنت (يستهلك رصيد Gemini) ثم تراجع النتائج قبل الحفظ.\n\nمتابعة؟")) return;
+    const raw = batch.map(p => ({
+      name: p.name,
+      category: (() => { const c = cats.find(x => x.id === p.categoryId); return c ? categoryPath(c, cats) : ""; })(),
+      price: Number(p.price) || 0,
+      qty: 0,
+      barcode: p.barcode || p.sku || null,
+      colors: (p.colors || []).map(c => c.name),
+      sizes: p.sizes || [],
+      description: p.description || "",
+      image: p.image || null
+    }));
+    await enrichAndOpen(raw, "إكمال بيانات المنتجات الناقصة 🔎", missing.length > batch.length ? ["أُكمل أول " + batch.length + " من " + missing.length + " منتج ناقص. أعد الضغط لإكمال الباقي."] : []);
+  });
+}
+
 function wireExcelSync() {
   const fileInput = document.getElementById("excelSyncInput");
   if (!fileInput || fileInput.dataset.wired) return;
@@ -1605,12 +1698,15 @@ async function compressImageForUpload(file, maxSide) {
 
 async function uploadToImgBB(file, isBanner = false) {
   if (!file) throw new Error("لم يتم اختيار ملف");
-  file = await compressImageForUpload(file, isBanner ? 2000 : 1600);
+  // رابط صورة (من إثراء الذكاء الاصطناعي): ImgBB يجلبها من الرابط بنفسه، فلا تمرّ بالمتصفح ولا يلزم تصغيرها هنا
+  const isUrl = typeof file === "string";
+  if (isUrl && !/^https?:\/\/[^\s]+$/i.test(file)) throw new Error("رابط الصورة غير صالح.");
+  if (!isUrl) file = await compressImageForUpload(file, isBanner ? 2000 : 1600);
 
   const MAX_SIZE_MB = 4;
   const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
 
-  if (file.size > MAX_SIZE_BYTES) {
+  if (!isUrl && file.size > MAX_SIZE_BYTES) {
     const currentMB = (file.size / (1024 * 1024)).toFixed(1);
     const errorMsg = `حجم الصورة كبير جداً (${currentMB}MB)! الحد الأقصى هو ${MAX_SIZE_MB}MB.`;
     showToast(errorMsg, "error");
@@ -1629,7 +1725,7 @@ async function uploadToImgBB(file, isBanner = false) {
     const timer = setTimeout(() => ctrl.abort(), 45000);
     try {
       const formData = new FormData();
-      formData.append("image", file, file.name || "image.jpg");
+      if (isUrl) formData.append("image", file); else formData.append("image", file, file.name || "image.jpg");
       const response = await fetch("https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey), {
         method: "POST", body: formData, signal: ctrl.signal
       });
