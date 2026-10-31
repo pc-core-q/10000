@@ -4,11 +4,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta charset="UTF-8">
   <title>لوحة تحكم الأدمن | {{storeName}}</title>
-  <link rel="stylesheet" href="css/style.css?v=85">
-  <link rel="stylesheet" href="css/refresh.css?v=85">
-  <script src="js/config.js?v=85"></script>
-  <script src="js/themes.js?v=85"></script>
-  <script src="js/boot.js?v=85"></script>
+  <link rel="stylesheet" href="css/style.css?v=89">
+  <link rel="stylesheet" href="css/refresh.css?v=89">
+  <script src="js/config.js?v=89"></script>
+  <script src="js/themes.js?v=89"></script>
+  <script src="js/boot.js?v=89"></script>
 </head>
 <body>
 
@@ -120,6 +120,9 @@
             <input type="text" id="aiPriceCommandInput" placeholder="اكتب أمراً مثل: خصم 10% على قسم العناية بالشعر، أو أرجع الأسعار الأصلية..." style="flex:1; min-width:260px; padding:9px 14px; border-radius:8px; border:1px solid var(--line-strong); font-size:0.9rem; font-family:inherit; background:#fff;">
             <button type="button" id="btnExecutePriceCommand" class="btn btn-primary btn-sm" style="white-space:nowrap;">
               تطبيق التسعير الذكي ✨
+            </button>
+            <button type="button" id="btnUndoPriceCommand" class="btn btn-outline btn-sm" style="white-space:nowrap; display:none;" title="يعيد أسعار آخر أمر تسعير ذكي (للمنتجات التي لم يتغير سعرها منذ ذلك)">
+              ↩️ تراجع عن آخر تسعير
             </button>
           </div>
         </div>
@@ -421,16 +424,16 @@
 <!-- مكتبة SheetJS لقراءة وتفكيك ملفات Excel و CSV مباشرة في المتصفح -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-<script src="js/icons.js?v=85"></script>
+<script src="js/icons.js?v=89"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
-<script src="js/store.js?v=85"></script>
-<script src="js/whatsapp.js?v=85"></script>
-<script src="js/app.js?v=85"></script>
-<script src="js/auth.js?v=85"></script>
-<script src="js/ai.js?v=85"></script>
-<script src="js/admin.js?v=85"></script>
+<script src="js/store.js?v=89"></script>
+<script src="js/whatsapp.js?v=89"></script>
+<script src="js/app.js?v=89"></script>
+<script src="js/auth.js?v=89"></script>
+<script src="js/ai.js?v=89"></script>
+<script src="js/admin.js?v=89"></script>
 <script>
   // تعبئة الأيقونات الثابتة
   document.querySelector(".admin-nav").innerHTML = document.querySelector(".admin-nav").innerHTML

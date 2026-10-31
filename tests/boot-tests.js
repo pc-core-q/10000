@@ -209,9 +209,10 @@ t("لا Analytics إذا كان المعرّف فارغاً أو الصفحة da
   assert.ok(!makeEnv(null, { htmlAttrs: ["data-no-analytics"] }).head.some(x => x.tag === "script"));
 });
 t("preconnect لـ Firebase و ImageKit من الإعدادات", () => {
-  const e = makeEnv();
+  // نحدد عنوان القاعدة داخل الاختبار نفسه كي لا يفشل كلما تغيّر مشروع Firebase في config.js
+  const e = makeEnv(C => { C.firebaseDatabaseURL = "https://demo-shop-default-rtdb.europe-west1.firebasedatabase.app/"; });
   const hrefs = e.head.filter(x => x._a && x._a.rel === "preconnect").map(x => x._a.href);
-  assert.ok(hrefs.includes("https://test3-2a6de-default-rtdb.europe-west1.firebasedatabase.app"));
+  assert.ok(hrefs.includes("https://demo-shop-default-rtdb.europe-west1.firebasedatabase.app"), JSON.stringify(hrefs));
   assert.ok(hrefs.includes("https://ik.imagekit.io"));
 });
 t("الشعار وأيقونة الموقع من config.logo مع رقم النسخة", () => {

@@ -1,6 +1,14 @@
 /* ==========================================================================
    admin.js
    منطق لوحة تحكم الأدمن بالكامل (admin.html). 
+   تم التحديث: 
+   1) توحيد شاشة المعاينة التفاعلية (إكسل، فواتير ورقية، مسح الرفوف).
+   2) دمج أدوات الإدخال إلى: "رفع صورة" (كاميرا أو معرض) و"رفع ملف" (PDF أو إكسل).
+   3) معالجة الألوان بدقة عالية واستبعاد الأوصاف الشفافة والمائية تلقائياً.
+   4) إرسال ملفات الإكسل مباشرة للذكاء الاصطناعي دون قيود على مسميات الأعمدة.
+   5) مطابقة الاسم التجاري الأساسي وإضافة الكميات الجديدة للرصيد الحالي تلقائياً (+).
+   6) المطابقة والإنشاء السريع للأقسام المفقودة في المعاينة (Auto-Category Match & Create).
+   7) شاشة انتظار محايدة ومتوافقة كلياً مع نظام التصميم ومتغيرات الثيمات (CSS Variables).
    ========================================================================== */
 
 let editingProductId = null;
@@ -35,34 +43,44 @@ const COLOR_PALETTE = [
   { match: ["أبيض", "ابيض", "white"], hex: "#ffffff" }
 ];
 
+// فحص واستبعاد الأوصاف الشفافة أو الفيزيائية
 function isTransparentOrInvalidColor(name) {
   if (!name) return true;
   const clean = name.trim().toLowerCase();
   const transparentTokens = ["شفاف", "شفافة", "شفافه", "مائي", "مائيه", "مائية", "عديم اللون", "عديمة اللون", "clear", "transparent", "سائل", "جيل", "جل"];
   const words = clean.split(/[\s\-_/]+/).filter(Boolean);
-  return words.length > 0 && words.every(w => transparentTokens.includes(w));
+  if (words.length > 0 && words.every(w => transparentTokens.includes(w))) {
+    return true;
+  }
+  return false;
 }
 
+// تنقية اسم اللون من الأوصاف الهامشية (مثل: "أزرق فاتح مائي شفاف" -> "أزرق فاتح")
 function cleanColorName(colorName) {
   if (!colorName) return "";
-  let cleaned = colorName
-    .replace(/\b(شفاف|شفافة|شفافه|مائي|مائية|مائيه|عديم اللون|clear|transparent)\b/gi, "")
+  // ⚠️ \b في JavaScript يعمل مع الحروف اللاتينية فقط فلا يطابق الكلمات العربية؛ لذلك نستعمل حدوداً صريحة (مسافة/فاصل/بداية/نهاية).
+  let cleaned = (" " + colorName + " ")
+    .replace(/(?<=[\s\-_/،,])(عديم اللون|عديمة اللون|شفافة|شفافه|شفاف|مائية|مائيه|مائي|clear|transparent)(?=[\s\-_/،,])/gi, " ")
     .replace(/[\s\-_/]+/g, " ")
     .trim();
   return cleaned || colorName.trim();
 }
 
+// دالة فحص اللون واستخراج الدرجة المناسبة بدقة
 function getColorHex(colorName) {
   if (!colorName) return "#2563eb";
   const clean = colorName.trim().toLowerCase();
+
   for (const item of COLOR_PALETTE) {
     if (item.match.some(keyword => clean.includes(keyword))) {
       return item.hex;
     }
   }
-  return "#2563eb";
+
+  return "#2563eb"; // الافتراضي أزرق محايد
 }
 
+// دالة توحيد الحروف للمطابقة الذكية النظيفة
 function cleanNameForMatch(str) {
   if (!str) return "";
   return String(str)
@@ -74,6 +92,40 @@ function cleanNameForMatch(str) {
     .replace(/[\s\-_/]+/g, " ");
 }
 
+// مسار القسم «الأب › الفرعي» (يميّز قسمين بنفس الاسم تحت أبوين مختلفين) — يُرسَل للذكاء الاصطناعي ويُطابَق به
+function categoryPath(c, categories) {
+  const parent = c && c.parentId ? (categories || []).find(x => x.id === c.parentId) : null;
+  return parent ? parent.name + " › " + c.name : c.name;
+}
+function categoryLabels() {
+  const cats = Store.getCategories();
+  return cats.map(c => categoryPath(c, cats));
+}
+
+// مطابقة قسم مقترح (اسم أو مسار «أب › فرعي») مع أقسام المتجر: تطابق تام أولاً (وبالأب إن ذُكر)، ثم جزئي **وحيد** فقط.
+// التكرار (نفس الاسم تحت أكثر من أب بلا ذكر الأب) = التباس ← null (لا تخمين).
+function matchCategory(name, categories) {
+  const parts = String(name || "").split(/[›»>]/).map(x => x.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const leaf = cleanNameForMatch(parts[parts.length - 1]);
+  const parentKey = parts.length > 1 ? cleanNameForMatch(parts[parts.length - 2]) : null;
+  if (!leaf) return null;
+  const list = (categories || []).map(c => {
+    const par = c.parentId ? (categories || []).find(x => x.id === c.parentId) : null;
+    return { c, k: cleanNameForMatch(c.name), pk: par ? cleanNameForMatch(par.name) : "" };
+  }).filter(x => x.k);
+  let exact = list.filter(x => x.k === leaf && (!parentKey || x.pk === parentKey));
+  if (!exact.length && parentKey) exact = list.filter(x => x.k === leaf);   // الأب المذكور لا يطابق ← نكتفي بالاسم
+  if (exact.length === 1) return exact[0].c;
+  if (exact.length > 1) return null;
+  if (leaf.length < 3) return null;
+  const partial = list.filter(x => x.k.includes(leaf) || (x.k.length >= 3 && leaf.includes(x.k)));
+  return partial.length === 1 ? partial[0].c : null;
+}
+
+/* ---------------------------------------------------------------------- */
+/* دالة الإنشاء السريع للقسم وتحديث القوائم في الكروت                      */
+/* ---------------------------------------------------------------------- */
 function fastAddCategory(catName) {
   if (!catName || !catName.trim()) return null;
   const clean = cleanNameForMatch(catName);
@@ -114,6 +166,9 @@ function refreshAllBatchCategorySelects(targetCard = null, selectId = null) {
   });
 }
 
+/* ---------------------------------------------------------------------- */
+/* شاشة التحميل المتوافقة مع دليل التصميم ونظام الثيمات                   */
+/* ---------------------------------------------------------------------- */
 let _processLoaderTimer = null;
 
 function showProcessLoader(title = "جارٍ معالجة البيانات...", customSteps = []) {
@@ -124,29 +179,86 @@ function showProcessLoader(title = "جارٍ معالجة البيانات...", 
     style.id = "processLoaderStyles";
     style.textContent = `
       #processLoadingOverlay {
-        position: fixed; inset: 0; background: var(--overlay, rgba(15, 23, 42, 0.65));
-        backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 999999;
-        display: flex; align-items: center; justify-content: center; padding: 16px;
-        opacity: 0; transition: opacity 0.25s ease; font-family: var(--font-body, inherit);
+        position: fixed;
+        inset: 0;
+        background: var(--overlay, rgba(15, 23, 42, 0.65));
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        z-index: 999999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        font-family: var(--font-body, inherit);
       }
       #processLoadingOverlay.active { opacity: 1; }
       .process-loader-card {
-        background: var(--surface); border: 1px solid var(--border); width: 100%; max-width: 400px;
-        border-radius: var(--r-card, 14px); padding: 28px 24px; text-align: center;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        width: 100%;
+        max-width: 400px;
+        border-radius: var(--r-card, 14px);
+        padding: 28px 24px;
+        text-align: center;
         box-shadow: var(--shadow-card, 0 10px 25px -5px rgba(0, 0, 0, 0.1));
-        display: flex; flex-direction: column; align-items: center; gap: 14px; transform: scale(0.95); transition: transform 0.25s ease;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+        transform: scale(0.95);
+        transition: transform 0.25s ease;
       }
       #processLoadingOverlay.active .process-loader-card { transform: scale(1); }
       .process-spinner {
-        width: 44px; height: 44px; border: 3px solid var(--border-soft, rgba(var(--text-rgb, 15, 23, 42), 0.1));
-        border-top-color: var(--primary); border-radius: 50%; animation: processSpin 0.85s linear infinite;
+        width: 44px;
+        height: 44px;
+        border: 3px solid var(--border-soft, rgba(var(--text-rgb, 15, 23, 42), 0.1));
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        animation: processSpin 0.85s linear infinite;
       }
-      @keyframes processSpin { to { transform: rotate(360deg); } }
-      .process-loader-title { font-size: 1.05rem; font-weight: 700; color: var(--heading-color, var(--primary)); margin: 0; }
-      .process-loader-step { font-size: 0.85rem; color: var(--text-2); min-height: 20px; margin: 0; transition: opacity 0.2s ease; }
-      .process-progress-track { width: 100%; height: 5px; background: var(--surface-2, rgba(var(--text-rgb, 15, 23, 42), 0.05)); border-radius: var(--r-ctl, 999px); overflow: hidden; position: relative; margin-top: 4px; }
-      .process-progress-bar { position: absolute; top: 0; bottom: 0; left: 0; width: 35%; background: var(--primary); border-radius: var(--r-ctl, 999px); animation: processProgressLoop 1.6s infinite ease-in-out; }
-      @keyframes processProgressLoop { 0% { left: -35%; width: 25%; } 50% { width: 55%; } 100% { left: 100%; width: 25%; } }
+      @keyframes processSpin {
+        to { transform: rotate(360deg); }
+      }
+      .process-loader-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: var(--heading-color, var(--primary));
+        margin: 0;
+      }
+      .process-loader-step {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        min-height: 20px;
+        margin: 0;
+        transition: opacity 0.2s ease;
+      }
+      .process-progress-track {
+        width: 100%;
+        height: 5px;
+        background: var(--surface-2, rgba(var(--text-rgb, 15, 23, 42), 0.05));
+        border-radius: var(--r-ctl, 999px);
+        overflow: hidden;
+        position: relative;
+        margin-top: 4px;
+      }
+      .process-progress-bar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 35%;
+        background: var(--primary);
+        border-radius: var(--r-ctl, 999px);
+        animation: processProgressLoop 1.6s infinite ease-in-out;
+      }
+      @keyframes processProgressLoop {
+        0% { left: -35%; width: 25%; }
+        50% { width: 55%; }
+        100% { left: 100%; width: 25%; }
+      }
     `;
     document.head.appendChild(style);
 
@@ -201,10 +313,15 @@ function hideProcessLoader() {
   const overlay = document.getElementById("processLoadingOverlay");
   if (overlay) {
     overlay.classList.remove("active");
-    setTimeout(() => { overlay.style.display = "none"; }, 250);
+    setTimeout(() => {
+      overlay.style.display = "none";
+    }, 250);
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* دالة مساعدة لرفع رقم نسخة الأقسام والإعلانات والإعدادات لحظياً         */
+/* ---------------------------------------------------------------------- */
 function bumpMetaVersion() {
   try {
     if (typeof firebase !== "undefined" && firebase.database) {
@@ -215,14 +332,33 @@ function bumpMetaVersion() {
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* مساعدة لتحويل DataURL إلى كائن Blob لرفعه إلى ImgBB                     */
+/* ---------------------------------------------------------------------- */
 function dataURLtoBlob(dataurl) {
   const arr = dataurl.split(',');
   const mime = arr[0].match(/:(.*?);/)[1];
   const bstr = atob(arr[1]);
   let n = bstr.length;
   const u8arr = new Uint8Array(n);
-  while (n--) { u8arr[n] = bstr.charCodeAt(n); }
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
   return new Blob([u8arr], { type: mime });
+}
+
+/* ---------------------------------------------------------------------- */
+/* بدء تشغيل الصفحة والتهيئة                                              */
+/* ---------------------------------------------------------------------- */
+// aiEnabled:false في config.js ← إخفاء كل أدوات الذكاء الاصطناعي (تشمل استيراد الإكسل لأنه يعتمد عليها)
+function applyAiAvailability() {
+  const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
+  if (cfg.aiEnabled !== false) return;
+  const hide = el => { if (el) el.style.display = "none"; };
+  hide(document.querySelector(".ai-toolkit-bar"));
+  hide(document.getElementById("btnAiGenDesc"));
+  const xl = document.getElementById("excelSyncInput");
+  hide(xl && (xl.closest("label") || xl));
 }
 
 async function initAdminPage() {
@@ -257,7 +393,9 @@ async function initAdminPage() {
   if (logoutBtn) logoutBtn.addEventListener("click", handleAdminLogout);
   
   const sidebarToggle = document.getElementById("adminSidebarToggle");
-  if (sidebarToggle) { sidebarToggle.addEventListener("click", toggleAdminSidebar); }
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener("click", toggleAdminSidebar);
+  }
 
   renderStats();
   renderProductsTable();
@@ -274,6 +412,8 @@ async function initAdminPage() {
   wireAdModal(); 
   wireSettingsForm();
 
+  // تفعيل الميزات الذكية وإدارات الاستيراد الموحدة
+  applyAiAvailability();
   wireExcelSync();
   wireSmartMediaScanner();
   wireAiPricing();
@@ -284,6 +424,9 @@ async function initAdminPage() {
   showUpdateNotice();
 }
 
+/* ---------------------------------------------------------------------- */
+/* إشعار "تم تحديث الموقع"                                                */
+/* ---------------------------------------------------------------------- */
 const UPDATE_NOTICE_ID = "2026-10-19";
 const UPDATE_NOTICE_KEY = "ws_admin_update_seen";
 
@@ -303,6 +446,7 @@ function showUpdateNotice() {
   if (closeBtn) closeBtn.addEventListener("click", dismiss);
   if (okBtn) okBtn.addEventListener("click", dismiss);
   modal.addEventListener("click", function (e) { if (e.target === modal) dismiss(); });
+
   modal.classList.add("open");
 }
 
@@ -342,6 +486,9 @@ async function openProductForEdit(productId) {
   openProductModal(productId);
 }
 
+/* ---------------------------------------------------------------------- */
+/* مزامنة البيانات مع Algolia                                             */
+/* ---------------------------------------------------------------------- */
 let _algoliaKeyDeclined = false;
 function algoliaConfigured() {
   const cfg = typeof STORE_CONFIG !== "undefined" ? STORE_CONFIG : {};
@@ -444,7 +591,90 @@ async function deleteProductFromAlgolia(productId) {
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* 1) ميزة التسعير بالأوامر الطبيعية                                     */
+/* ---------------------------------------------------------------------- */
+/* ---- التراجع عن آخر أمر تسعير ---- */
+const PRICE_UNDO_KEY = "ws_price_undo_v1";
+let _priceUndoMem = null;
+
+function savePriceUndo(summary, rows) {
+  const rec = { ts: Date.now(), summary: String(summary || ""), rows: rows || [] };
+  _priceUndoMem = rec;
+  try { localStorage.setItem(PRICE_UNDO_KEY, JSON.stringify(rec)); } catch (e) { /* التخزين ممتلئ: تبقى اللقطة في الذاكرة لهذه الجلسة */ }
+}
+function loadPriceUndo() {
+  if (_priceUndoMem) return _priceUndoMem;
+  try {
+    const r = JSON.parse(localStorage.getItem(PRICE_UNDO_KEY) || "null");
+    if (r && Array.isArray(r.rows) && r.rows.length) return (_priceUndoMem = r);
+  } catch (e) {}
+  return null;
+}
+function clearPriceUndo() {
+  _priceUndoMem = null;
+  try { localStorage.removeItem(PRICE_UNDO_KEY); } catch (e) {}
+}
+// يحدّد ما يمكن إرجاعه: المنتج الذي عُدّل سعره يدوياً بعد التسعير لا يُمسّ (حتى لا نمحو تعديلاً لاحقاً)
+function planPriceUndo(products, rec) {
+  const byId = new Map();
+  (products || []).forEach(p => { if (p) byId.set(String(p.id), p); });
+  const restore = []; let skipped = 0, missing = 0;
+  (rec.rows || []).forEach(r => {
+    const p = byId.get(String(r.id));
+    if (!p) { missing++; return; }
+    if ((Number(p.price) || 0) !== r.after.price || (Number(p.oldPrice) || 0) !== r.after.oldPrice) { skipped++; return; }
+    restore.push({ p, before: r.before });
+  });
+  return { restore, skipped, missing };
+}
+function refreshUndoButton() {
+  const btn = document.getElementById("btnUndoPriceCommand");
+  if (!btn) return;
+  const rec = loadPriceUndo();
+  btn.style.display = rec ? "" : "none";
+  if (rec) btn.title = "التراجع عن: " + rec.summary + " (" + rec.rows.length + " منتج، " + new Date(rec.ts).toLocaleString("ar-EG") + ")";
+}
+function wirePriceUndo() {
+  const btn = document.getElementById("btnUndoPriceCommand");
+  if (!btn || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
+  refreshUndoButton();
+  btn.addEventListener("click", async () => {
+    const rec = loadPriceUndo();
+    if (!rec) { showToast("لا يوجد تسعير للتراجع عنه", "error"); refreshUndoButton(); return; }
+    if (!ensureProductsWritable()) return;
+    if (!(await ensureFullCatalogForBulk())) return;
+    const plan = planPriceUndo(Store.getProducts(), rec);
+    if (!plan.restore.length) {
+      showToast("لا يمكن التراجع: كل المنتجات تغيّرت أسعارها منذ ذلك التسعير أو حُذفت.", "error");
+      return;
+    }
+    const msg = "التراجع عن: " + rec.summary + "\nبتاريخ " + new Date(rec.ts).toLocaleString("ar-EG") +
+      "\n\nسيُعاد سعر " + plan.restore.length + " منتج" +
+      (plan.skipped ? "\nسيُتجاهل " + plan.skipped + " منتج عُدّل سعره بعد ذلك (حفاظاً على تعديلك)" : "") +
+      (plan.missing ? "\nو" + plan.missing + " منتج محذوف" : "") + "\n\nتأكيد؟";
+    if (!confirm(msg)) return;
+    btn.disabled = true;
+    try {
+      plan.restore.forEach(x => { x.p.price = x.before.price; x.p.oldPrice = x.before.oldPrice; x.p.isOffer = x.before.isOffer; });
+      const saved = await Store.saveProducts(Store.getProducts());
+      if (saved === false) { showToast("تعذّر حفظ التراجع على الخادم. حدّث الصفحة وأعد المحاولة.", "error"); return; }
+      await syncProductsToAlgolia(plan.restore.map(x => x.p));
+      clearPriceUndo();
+      refreshUndoButton();
+      renderProductsTable();
+      renderStats();
+      showToast("تم التراجع وإرجاع أسعار " + plan.restore.length + " منتج ✅", "success");
+    } catch (err) {
+      console.error(err);
+      showToast(err.message || "فشل التراجع", "error");
+    } finally { btn.disabled = false; }
+  });
+}
+
 function wireAiPricing() {
+  wirePriceUndo();
   const btn = document.getElementById("btnExecutePriceCommand");
   const input = document.getElementById("aiPriceCommandInput");
   if (!btn || !input || btn.dataset.wired) return;
@@ -469,88 +699,86 @@ function wireAiPricing() {
 
     try {
       const categories = Store.getCategories();
-      const categoryNames = categories.map(c => c.name);
+      const categoryNames = categoryLabels();
+      // parsePriceCommand يتحقق من الخطة (إجراء مسموح، قيمة، قسم موجود فعلاً، نطاق سعر) ويرمي خطأ عند أي التباس
       const plan = await window.StoreAI.parsePriceCommand(command, categoryNames);
-
-      if (!plan || !plan.action) {
-        throw new Error("لم يتمكن النظام من فهم الأمر بدقة. أعد صياغته بوضوح.");
-      }
-
-      const confirmMsg = `سيتم تطبيق الإجراء التالي:\n"${plan.summary || command}"\n\nهل تريد تأكيد التعديل وتحديث الأسعار؟`;
-      if (!confirm(confirmMsg)) return;
 
       if (!(await ensureFullCatalogForBulk())) return;
 
-      let products = Store.getProducts();
-      let matchedCat = null;
+      // القسم المطلوب + أقسامه الفرعية (المنتجات غالباً تتبع القسم الفرعي)
+      let allowedCatIds = null;
       if (plan.category) {
-        matchedCat = categories.find(c => 
-          c.name.toLowerCase().includes(plan.category.toLowerCase()) || 
-          plan.category.toLowerCase().includes(c.name.toLowerCase())
-        );
+        const root = categories.find(c => categoryPath(c, categories) === plan.category) || matchCategory(plan.category, categories);
+        if (!root) throw new Error("القسم «" + plan.category + "» لم يعد موجوداً. أعد المحاولة.");
+        allowedCatIds = new Set([root.id]);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          categories.forEach(c => { if (c.parentId && allowedCatIds.has(c.parentId) && !allowedCatIds.has(c.id)) { allowedCatIds.add(c.id); grew = true; } });
+        }
       }
 
-      let affectedCount = 0;
-      const touchedProducts = [];
+      const products = Store.getProducts();
+      const planned = [];   // [{p, price, oldPrice, isOffer}] — حساب فقط، لا تعديل قبل التأكيد
 
       products.forEach(p => {
-        if (matchedCat && p.categoryId !== matchedCat.id) return;
-        
-        let curPrice = Number(p.price) || 0;
-        let curOldPrice = Number(p.oldPrice) || 0;
+        if (!p) return;
+        if (allowedCatIds && !allowedCatIds.has(p.categoryId)) return;
 
-        if (plan.minPrice !== null && plan.minPrice !== undefined && curPrice < plan.minPrice) return;
-        if (plan.maxPrice !== null && plan.maxPrice !== undefined && curPrice > plan.maxPrice) return;
+        const curPrice = Number(p.price) || 0;
+        const curOldPrice = Number(p.oldPrice) || 0;
+        if (plan.minPrice !== null && curPrice < plan.minPrice) return;
+        if (plan.maxPrice !== null && curPrice > plan.maxPrice) return;
 
-        let modified = false;
+        let price = curPrice, oldPrice = curOldPrice, isOffer = !!p.isOffer, modified = false;
 
         if (plan.action === "discount_percent") {
-          const pct = Math.min(100, Math.max(0, Number(plan.value) || 0));
-          if (pct > 0) {
-            if (!curOldPrice || curOldPrice <= curPrice) p.oldPrice = curPrice;
-            p.price = Math.round(curPrice * (1 - pct / 100));
-            p.isOffer = true;
-            modified = true;
-          }
+          if (!oldPrice || oldPrice <= price) oldPrice = price;
+          price = Math.round(curPrice * (1 - plan.value / 100));
+          isOffer = true; modified = price !== curPrice;
         } else if (plan.action === "discount_fixed") {
-          const val = Number(plan.value) || 0;
-          if (val > 0) {
-            if (!curOldPrice || curOldPrice <= curPrice) p.oldPrice = curPrice;
-            p.price = Math.max(0, curPrice - val);
-            p.isOffer = true;
-            modified = true;
-          }
-        } else if (plan.action === "increase_percent") {
-          const pct = Number(plan.value) || 0;
-          if (pct > 0) {
-            p.price = Math.round(curPrice * (1 + pct / 100));
-            modified = true;
-          }
-        } else if (plan.action === "increase_fixed") {
-          const val = Number(plan.value) || 0;
-          if (val > 0) {
-            p.price = curPrice + val;
-            modified = true;
-          }
+          if (!oldPrice || oldPrice <= price) oldPrice = price;
+          price = Math.max(0, curPrice - plan.value);
+          isOffer = true; modified = price !== curPrice;
+        } else if (plan.action === "increase_percent" || plan.action === "increase_fixed") {
+          price = plan.action === "increase_percent" ? Math.round(curPrice * (1 + plan.value / 100)) : curPrice + plan.value;
+          // إن لحق السعر الجديد «السعر القديم» فلا معنى للعرض (يظهر سعر مشطوب أصغر من الجديد)
+          if (oldPrice && oldPrice <= price) { oldPrice = 0; isOffer = false; }
+          modified = price !== curPrice;
         } else if (plan.action === "reset_discount") {
-          if (curOldPrice && curOldPrice > curPrice) {
-            p.price = curOldPrice;
-            p.oldPrice = 0;
-            p.isOffer = false;
-            modified = true;
-          }
+          if (oldPrice && oldPrice > curPrice) { price = oldPrice; oldPrice = 0; isOffer = false; modified = true; }
         }
 
-        if (modified) {
-          affectedCount++;
-          touchedProducts.push(p);
-        }
+        if (modified) planned.push({ p, price, oldPrice, isOffer });
       });
 
-      if (affectedCount === 0) {
+      if (!planned.length) {
         showToast("لم يتم العثور على منتجات مطابقة لتطبيق هذا الأمر", "error");
         return;
       }
+
+      // المعاينة: الخلاصة مبنية من الخطة المتحقق منها + العدد الحقيقي + مثال فعلي
+      const ex = planned[0];
+      const fmt = n => Number(n).toLocaleString("en-US");
+      const confirmMsg = "سيتم تطبيق:\n" + plan.summary + "\n\nعدد المنتجات المتأثرة: " + planned.length + " من " + products.length +
+        "\nمثال: «" + String(ex.p.name || "").slice(0, 40) + "»: " + fmt(ex.p.price) + " ← " + fmt(ex.price) +
+        "\n\nهل تريد التأكيد؟";
+      if (!confirm(confirmMsg)) return;
+
+      const touchedProducts = [];
+      const undoRows = [];   // لقطة قبل/بعد لزر «تراجع»
+      planned.forEach(x => {
+        undoRows.push({
+          id: x.p.id,
+          before: { price: Number(x.p.price) || 0, oldPrice: Number(x.p.oldPrice) || 0, isOffer: !!x.p.isOffer },
+          after: { price: x.price, oldPrice: x.oldPrice, isOffer: x.isOffer }
+        });
+        x.p.price = x.price;
+        x.p.oldPrice = x.oldPrice;
+        x.p.isOffer = x.isOffer;
+        touchedProducts.push(x.p);
+      });
+      const affectedCount = touchedProducts.length;
 
       const saved = await Store.saveProducts(products);
       if (saved === false) {
@@ -558,10 +786,12 @@ function wireAiPricing() {
         return;
       }
 
+      savePriceUndo(plan.summary, undoRows);
+      refreshUndoButton();
       await syncProductsToAlgolia(touchedProducts);
       renderProductsTable();
       renderStats();
-      showToast(`تم بنجاح تحديث أسعار ${affectedCount} منتج ✨`, "success");
+      showToast(`تم بنجاح تحديث أسعار ${affectedCount} منتج ✨ (يمكنك التراجع بزر ↩️)`, "success");
       input.value = "";
     } catch (err) {
       console.error(err);
@@ -573,6 +803,9 @@ function wireAiPricing() {
   });
 }
 
+/* ---------------------------------------------------------------------- */
+/* 2) النافذة الموحدة لمعاينة ومراجعة البضائع المستوردة                   */
+/* ---------------------------------------------------------------------- */
 function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد البضائع المستخرجة 📦") {
   const modal = document.getElementById("shelfScanModal");
   const container = document.getElementById("shelfDetectedList");
@@ -604,6 +837,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
     const initialBarcode = item.barcode || "";
     const initialDesc = item.description || "";
     
+    // تصفية الألوان من الشفاف
     const cleanColorsList = (item.colors || [])
       .map(c => cleanColorName(String(c)))
       .filter(c => c && !isTransparentOrInvalidColor(c));
@@ -655,6 +889,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 
       <input type="text" class="shelf-item-name" value="${escapeHtml(initialName)}" placeholder="اسم المنتج الأساسي" style="padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-weight:600;">
       
+      <!-- اختيار أو إنشاء القسم بسرعة -->
       <div>
         <div style="display:flex; gap:6px; align-items:center;">
           <select class="shelf-item-category" style="flex:1; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.85rem; font-family:inherit; background:var(--surface); color:var(--text);">
@@ -676,6 +911,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
 
       <textarea class="shelf-item-desc" placeholder="وصف المنتج ومميزاته ومواصفاته..." rows="2" style="width:100%; padding:6px 8px; border:1px solid var(--line-strong); border-radius:6px; font-size:0.8rem; resize:vertical; font-family:inherit;">${escapeHtml(initialDesc)}</textarea>
 
+      <!-- حقول الألوان والمقاسات التلقائية -->
       <div style="display:flex; gap:6px;">
         <div style="flex:1;">
           <label style="font-size:0.75rem; color:var(--ink-400); display:block; margin-bottom:2px;">الألوان (اختياري)</label>
@@ -714,7 +950,7 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
       if (item.categoryId) {
         catSelect.value = item.categoryId;
       } else if (cleanSuggestedCat) {
-        const found = categories.find(c => cleanNameForMatch(c.name) === cleanSuggestedCat || cleanNameForMatch(c.name).includes(cleanSuggestedCat));
+        const found = matchCategory(item.category, categories);
         if (found) catSelect.value = found.id;
       }
     }
@@ -725,7 +961,9 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
         const catName = prompt("اكتب اسم القسم الجديد:");
         if (catName && catName.trim()) {
           const newId = fastAddCategory(catName);
-          if (newId) { refreshAllBatchCategorySelects(card, newId); }
+          if (newId) {
+            refreshAllBatchCategorySelects(card, newId);
+          }
         }
       });
     }
@@ -758,40 +996,37 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
         const box = card.querySelector(".shelf-img-box");
         box.innerHTML = `<img class="shelf-item-img" src="${escapeHtml(url.trim())}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
         card.querySelector(".shelf-item-check").setAttribute("data-crop", url.trim());
-        card.style.borderColor = "var(--success, #22c55e)";
+        card.style.borderColor = "var(--olive-600, #4ade80)";
       }
     });
 
-    // الرفع الفوري التلقائي عبر دالة ImgBB المباشرة
+    // رفع فوري عند اختيار الصورة (فكرة النسخة الأخرى): الصورة تُرفع إلى ImgBB ← ImageKit فوراً ويُكتب الرابط في البطاقة،
+    // فيكون خطوة «حفظ» سريعة ويرى المدير فشل أي صورة في بطاقتها. الرفع نفسه عبر uploadToImgBB (تصغير + مهلة + إعادة محاولة).
     card.querySelector(".shelf-card-file").addEventListener("change", async (ev) => {
       const f = ev.target.files[0];
       if (!f) return;
-
       const box = card.querySelector(".shelf-img-box");
       const checkEl = card.querySelector(".shelf-item-check");
       const originalBoxContent = box.innerHTML;
-
-      box.innerHTML = `
-        <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:var(--primary);">
-          <div class="process-spinner" style="width:24px; height:24px; border-width:2px;"></div>
-          <span style="font-size:11px; font-weight:600;">جارٍ رفع الصورة...</span>
-        </div>
-      `;
-
+      card.dataset.uploading = "1";            // يمنع «حفظ» قبل اكتمال الرفع (وإلا يُحفظ المنتج بلا صورة)
+      box.innerHTML = '<div style="display:flex; flex-direction:column; align-items:center; gap:6px; color:var(--primary);"><div class="process-spinner" style="width:24px; height:24px; border-width:2px;"></div><span style="font-size:11px; font-weight:600;">جارٍ رفع الصورة...</span></div>';
       try {
         const cdnUrl = await uploadToImgBB(f, false);
         box.innerHTML = `<img class="shelf-item-img" src="${escapeHtml(cdnUrl)}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
         checkEl.setAttribute("data-crop", cdnUrl);
-        card.style.borderColor = "var(--success, #22c55e)";
-        showToast("تم رفع وتجهيز صورة المنتج بنجاح!", "success");
+        card.style.borderColor = "var(--olive-600, #4ade80)";
       } catch (err) {
         console.error("Upload error:", err);
         box.innerHTML = originalBoxContent;
         showToast(err.message || "فشل رفع الصورة.", "error");
+      } finally {
+        delete card.dataset.uploading;
+        ev.target.value = "";
       }
     });
 
     card.querySelector(".shelf-item-check").addEventListener("change", updateCounter);
+
     container.appendChild(card);
   });
 
@@ -811,6 +1046,9 @@ function renderBatchReviewCards(items, modalTitle = "مراجعة وتأكيد �
   modal.classList.add("open");
 }
 
+/* ---------------------------------------------------------------------- */
+/* معالجة ملفات الإكسل مباشرة عبر الذكاء الاصطناعي مع استخراج الروابط      */
+/* ---------------------------------------------------------------------- */
 async function handleExcelFileWithAI(file) {
   showProcessLoader("تحليل بيانات الإكسل عبر الذكاء الاصطناعي", [
     "جارٍ قراءة وتفريغ جدول الإكسل والروابط...",
@@ -820,30 +1058,49 @@ async function handleExcelFileWithAI(file) {
   ]);
 
   try {
+    if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") throw new Error("ملف js/ai.js غير محمل");
     const data = await file.arrayBuffer();
     const workbook = XLSX.read(data);
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const storeCategories = categoryLabels();
 
-    Object.keys(sheet).forEach(cellRef => {
-      if (cellRef.startsWith("!")) return;
-      const cell = sheet[cellRef];
-      if (cell && cell.l && cell.l.Target) {
-        const url = cell.l.Target;
-        cell.v = `${cell.v || ""} [URL: ${url}]`;
-        if (cell.w) cell.w = `${cell.w} [URL: ${url}]`;
-      }
-    });
+    // كل الأوراق (كان الكود يقرأ الورقة الأولى فقط فتضيع بقية المنتجات بصمت)
+    let all = [];
+    let warnings = [];
+    let sheetsUsed = 0;
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) continue;
 
-    const csvText = XLSX.utils.sheet_to_csv(sheet);
-    if (!csvText || !csvText.trim()) {
+      // استخراج الروابط التشعبية المضمنة حتى لا تضيع روابط الصور
+      Object.keys(sheet).forEach(cellRef => {
+        if (cellRef.startsWith("!")) return;
+        const cell = sheet[cellRef];
+        if (cell && cell.l && cell.l.Target) {
+          const url = cell.l.Target;
+          cell.v = `${cell.v || ""} [URL: ${url}]`;
+          if (cell.w) cell.w = `${cell.w} [URL: ${url}]`;
+        }
+      });
+
+      const csvText = XLSX.utils.sheet_to_csv(sheet);
+      if (!csvText || !csvText.trim()) continue;
+      sheetsUsed++;
+
+      // الجدول الكبير يُقطَّع تلقائياً إلى دفعات داخل StoreAI.scanInvoice
+      const result = await window.StoreAI.scanInvoice(csvText, "text/csv", storeCategories);
+      all = all.concat(result.items || []);
+      const label = workbook.SheetNames.length > 1 ? "[" + sheetName + "] " : "";
+      warnings = warnings.concat((result.warnings || []).map(w => label + w));
+    }
+
+    if (!sheetsUsed) {
       hideProcessLoader();
       showToast("ملف الإكسل فارغ أو لا يحتوي على بيانات.", "error");
       return;
     }
 
-    const storeCategories = Store.getCategories().map(c => c.name);
-    const result = await window.StoreAI.scanInvoice(csvText, "text/csv", storeCategories);
-    const rawItems = (result && result.items) ? result.items : [];
+    // توحيد المكرر عبر الأوراق
+    const rawItems = window.StoreAI.normalizeItems(all).items;
 
     if (!rawItems.length) {
       hideProcessLoader();
@@ -851,7 +1108,7 @@ async function handleExcelFileWithAI(file) {
       return;
     }
 
-    processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) 📊");
+    processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الإكسل (عبر الذكاء الاصطناعي) 📊", warnings);
   } catch (err) {
     hideProcessLoader();
     console.error("Excel AI import error:", err);
@@ -859,6 +1116,9 @@ async function handleExcelFileWithAI(file) {
   }
 }
 
+/* ---------------------------------------------------------------------- */
+/* 3) المعالجة الموحدة للوسائط الذكية (رفع صورة شاملة / رفع ملف مستند)     */
+/* ---------------------------------------------------------------------- */
 function wireSmartMediaScanner() {
   const imgInput = document.getElementById("aiImageInput");
   const fileInput = document.getElementById("aiFileInput");
@@ -889,6 +1149,7 @@ function wireSmartMediaScanner() {
     cancelBtn.addEventListener("click", closeModal);
   }
 
+  // أ) معالجة "رفع صورة" (كاميرا أو معرض)
   if (imgInput && !imgInput.dataset.wired) {
     imgInput.dataset.wired = "1";
     imgInput.addEventListener("change", async (e) => {
@@ -908,42 +1169,29 @@ function wireSmartMediaScanner() {
       ]);
 
       try {
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const dataUrl = reader.result;
-            const base64Clean = dataUrl.split(",")[1];
-            const mimeType = file.type || "image/jpeg";
-            const storeCategories = Store.getCategories().map(c => c.name);
+        const prepared = await window.StoreAI.prepareImage(file);   // تصغير + JPEG (أسرع وأدق وأقل عرضة لتجاوز الحد)
+        const storeCategories = categoryLabels();
+        const result = await window.StoreAI.scanInvoice(prepared.base64, prepared.mimeType, storeCategories);
+        const rawItems = result.items || [];
 
-            const result = await window.StoreAI.scanInvoice(base64Clean, mimeType, storeCategories);
-            const rawItems = (result && result.items) ? result.items : [];
+        if (!rawItems.length) {
+          hideProcessLoader();
+          showToast("لم يتم العثور على منتجات واضحة في الصورة.", "error");
+          return;
+        }
 
-            if (!rawItems.length) {
-              hideProcessLoader();
-              showToast("لم يتم العثور على منتجات واضحة في الصورة.", "error");
-              return;
-            }
-
-            processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من الصورة 🖼️");
-          } catch (err) {
-            hideProcessLoader();
-            console.error(err);
-            showToast(err.message || "حدث خطأ أثناء معالجة الصورة", "error");
-          } finally {
-            imgInput.value = "";
-          }
-        };
-        reader.readAsDataURL(file);
+        processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من الصورة 🖼️", result.warnings);
       } catch (err) {
         hideProcessLoader();
         console.error(err);
-        showToast("تعذر قراءة ملف الصورة", "error");
+        showToast(err.message || "حدث خطأ أثناء معالجة الصورة", "error");
+      } finally {
         imgInput.value = "";
       }
     });
   }
 
+  // ب) معالجة "رفع ملف" (فواتير PDF مباشرة أو ملفات Excel)
   if (fileInput && !fileInput.dataset.wired) {
     fileInput.dataset.wired = "1";
     fileInput.addEventListener("change", async (e) => {
@@ -952,6 +1200,7 @@ function wireSmartMediaScanner() {
 
       const fileName = file.name.toLowerCase();
 
+      // معالجة الإكسل مباشرة عبر الذكاء الاصطناعي
       if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv")) {
         try {
           await handleExcelFileWithAI(file);
@@ -961,6 +1210,7 @@ function wireSmartMediaScanner() {
         return;
       }
 
+      // معالجة ملفات PDF مباشرة
       if (fileName.endsWith(".pdf") || file.type === "application/pdf") {
         if (!window.StoreAI || typeof window.StoreAI.scanInvoice !== "function") {
           showToast("خدمة الذكاء الاصطناعي غير متوفرة", "error");
@@ -976,36 +1226,23 @@ function wireSmartMediaScanner() {
         ]);
 
         try {
-          const reader = new FileReader();
-          reader.onload = async () => {
-            try {
-              const dataUrl = reader.result;
-              const base64Clean = dataUrl.split(",")[1];
-              const storeCategories = Store.getCategories().map(c => c.name);
+          const prepared = await window.StoreAI.preparePdf(file);    // يتحقق من الحجم (≤12MB)
+          const storeCategories = categoryLabels();
+          const result = await window.StoreAI.scanInvoice(prepared.base64, prepared.mimeType, storeCategories);
+          const rawItems = result.items || [];
 
-              const result = await window.StoreAI.scanInvoice(base64Clean, "application/pdf", storeCategories);
-              const rawItems = (result && result.items) ? result.items : [];
+          if (!rawItems.length) {
+            hideProcessLoader();
+            showToast("لم يتم العثور على أصناف قابلة للاستخراج في ملف PDF.", "error");
+            return;
+          }
 
-              if (!rawItems.length) {
-                hideProcessLoader();
-                showToast("لم يتم العثور على أصناف قابلة للاستخراج في ملف PDF.", "error");
-                return;
-              }
-
-              processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الفاتورة (PDF) 📄");
-            } catch (err) {
-              hideProcessLoader();
-              console.error(err);
-              showToast(err.message || "حدث خطأ أثناء قراءة ملف PDF", "error");
-            } finally {
-              fileInput.value = "";
-            }
-          };
-          reader.readAsDataURL(file);
+          processAndOpenBatchReview(rawItems, "المنتجات المستخرجة من ملف الفاتورة (PDF) 📄", result.warnings);
         } catch (err) {
           hideProcessLoader();
           console.error(err);
-          showToast("تعذر قراءة ملف PDF", "error");
+          showToast(err.message || "حدث خطأ أثناء قراءة ملف PDF", "error");
+        } finally {
           fileInput.value = "";
         }
         return;
@@ -1016,10 +1253,16 @@ function wireSmartMediaScanner() {
     });
   }
 
+  // ج) تأكيد وحفظ التحديثات المجمعة
   if (saveBtn && !saveBtn.dataset.wired) {
     saveBtn.dataset.wired = "1";
-    saveBtn.addEventListener("click", async () => {
+    let _batchSaving = false;   // يمنع الضغط المزدوج (كان يُنشئ كل المنتجات مرتين)
+    const _doBatchSave = async () => {
       const container = document.getElementById("shelfDetectedList");
+      if (container.querySelector('.shelf-item-card[data-uploading="1"]')) {
+        showToast("انتظر اكتمال رفع الصور في البطاقات ثم احفظ.", "error");
+        return;
+      }
       const cards = container.querySelectorAll(".shelf-item-card");
       const toProcess = [];
 
@@ -1039,6 +1282,7 @@ function wireSmartMediaScanner() {
         const colorsRaw = card.querySelector(".shelf-item-colors")?.value.trim() || "";
         const sizesRaw = card.querySelector(".shelf-item-sizes")?.value.trim() || "";
         
+        // استبعاد أي لون شفاف أو قوام مائي تلقائياً عند الحفظ
         const rawColors = colorsRaw 
           ? colorsRaw.split(/[,،/|]/)
               .map(s => cleanColorName(s.trim()))
@@ -1060,31 +1304,47 @@ function wireSmartMediaScanner() {
       if (!(await ensureFullCatalogForBulk())) return;
 
       showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", [
-        "جارٍ معالجة وتثبيت صور المنتجات...",
-        "جارٍ مزامنة المخزون والأسعار...",
+        "جارٍ معالجة ورفع صور المنتجات...",
+        "جارٍ مزامنة وتحديث كميات المخزون...",
         "جارٍ ربط وتحديث قاعدة البيانات..."
       ]);
 
       try {
         let addedCount = 0;
         let updatedCount = 0;
+        let imgFailed = 0;
         const touchedProducts = [];
         let allProducts = Store.getProducts();
-        const now = Date.now();
 
+        // نفس مسار صورة المنتج المفرد: ملف ← ImgBB ← رابط ImageKit يُكتب في Firebase (uploadToImgBB).
+        // الروابط الخارجية http(s) تُحفظ كما هي. الرفع متوازٍ (3 معاً) مع عدّاد تقدّم ظاهر.
+        const uploadJobs = toProcess.filter(it => it.imgUrl && it.imgUrl.startsWith("data:"));
+        if (uploadJobs.length) {
+          let doneUploads = 0, cursor = 0;
+          const stepMsg = () => showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", ["جارٍ رفع الصور إلى ImgBB: " + doneUploads + " من " + uploadJobs.length]);
+          stepMsg();
+          const worker = async () => {
+            while (cursor < uploadJobs.length) {
+              const job = uploadJobs[cursor++];
+              try {
+                job.imgUrl = await uploadToImgBB(dataURLtoBlob(job.imgUrl), false);
+              } catch (e) {
+                // لا نحفظ base64 داخل Firebase؛ المنتج يُحفظ بلا صورة وتُعرض رسالة بالعدد
+                console.warn("ImgBB upload failed, image skipped:", e);
+                job.imgUrl = "";
+                imgFailed++;
+              }
+              doneUploads++; stepMsg();
+            }
+          };
+          await Promise.all([worker(), worker(), worker()]);
+          showProcessLoader("جارٍ حفظ البيانات وتحديث المتجر", ["جارٍ ربط وتحديث قاعدة البيانات..."]);
+        }
+
+        const now = Date.now();
         for (let i = 0; i < toProcess.length; i++) {
           const item = toProcess[i];
           let finalImgUrl = item.imgUrl;
-
-          if (item.imgUrl && item.imgUrl.startsWith("data:")) {
-            try {
-              const blob = dataURLtoBlob(item.imgUrl);
-              finalImgUrl = await uploadToImgBB(blob, false);
-            } catch (e) {
-              console.warn("ImgBB upload fallback:", e);
-              finalImgUrl = "";
-            }
-          }
 
           const cleanItemName = cleanNameForMatch(item.name);
           let existingProduct = item.existingId
@@ -1103,12 +1363,16 @@ function wireSmartMediaScanner() {
             const rowKeys = cleanColors.length ? cleanColors.map(c => c.name) : [null];
             const colKeys = cleanSizes.length ? cleanSizes : [null];
             const totalCombos = rowKeys.length * colKeys.length;
-            const qtyPerCombo = totalCombos > 0 ? Math.max(1, Math.floor(item.stock / totalCombos)) : item.stock;
+            // نوزّع الكمية كما هي بالضبط (المجموع = الكمية الواردة). القديم كان يرفع كل توليفة إلى 1 على الأقل
+            // فتصير الكمية 10 لمنتج وارد منه 5 فقط (5 ألوان × 2 مقاس).
+            const baseQty = Math.floor(item.stock / totalCombos);
+            let remainder = item.stock - baseQty * totalCombos;
 
             rowKeys.forEach(color => {
               colKeys.forEach(size => {
                 const key = inventoryKeyFor(color, size);
-                cleanInventory[key] = qtyPerCombo;
+                cleanInventory[key] = baseQty + (remainder > 0 ? 1 : 0);
+                if (remainder > 0) remainder--;
               });
             });
           }
@@ -1138,6 +1402,7 @@ function wireSmartMediaScanner() {
             if (mergedColors.length) existingProduct.colors = mergedColors;
             if (mergedSizes.length) existingProduct.sizes = mergedSizes;
 
+            // جمع الكمية الواردة إلى الرصيد الحالي للمنتج (+)
             const incomingQty = Number(item.stock) || 0;
             const currentTotalStock = Number(existingProduct.stock) || 0;
 
@@ -1187,24 +1452,45 @@ function wireSmartMediaScanner() {
           }
         }
 
-        await Store.saveProducts(Store.getProducts());
+        const savedOk = await Promise.race([
+          Store.saveProducts(Store.getProducts()),
+          new Promise(res => setTimeout(() => res("timeout"), 90000))
+        ]);
+        if (savedOk === "timeout") {
+          hideProcessLoader();
+          showToast("الحفظ في Firebase يتأخر أكثر من 90 ثانية. تحقق من الاتصال ثم حدّث الصفحة وتأكد من ظهور المنتجات قبل إعادة المحاولة.", "error");
+          return;
+        }
+        if (savedOk === false) {
+          // كان الكود يعلن النجاح حتى لو رفض الخادم الكتابة
+          hideProcessLoader();
+          showToast("تعذّر حفظ المنتجات على الخادم، لم يُحفظ شيء. حدّث الصفحة وأعد المحاولة.", "error");
+          return;
+        }
         await syncProductsToAlgolia(touchedProducts);
 
         hideProcessLoader();
         renderProductsTable();
         renderStats();
-        showToast(`تم بنجاح! إضافة (${addedCount}) منتج وتحديث رصيد (${updatedCount}) منتج 🚀`, "success");
+        showToast(`تم بنجاح! تمت إضافة (${addedCount}) منتج وتحديث رصيد (${updatedCount}) منتج. 🚀` + (imgFailed ? ` ⚠️ تعذّر رفع ${imgFailed} صورة فحُفظت تلك المنتجات بلا صورة.` : ""), imgFailed ? "error" : "success");
         closeModal();
       } catch (err) {
         hideProcessLoader();
-        console.error("Save products error:", err);
+        console.error(err);
         showToast("حدث خطأ أثناء حفظ البيانات: " + err.message, "error");
       }
+    };
+    saveBtn.addEventListener("click", async () => {
+      if (_batchSaving) return;
+      _batchSaving = true;
+      saveBtn.disabled = true;
+      try { await _doBatchSave(); } finally { _batchSaving = false; saveBtn.disabled = false; }
     });
   }
 }
 
-function processAndOpenBatchReview(rawItems, modalTitle) {
+// دالة توحيد المطابقة وفتح شاشة المراجعة (مع تنقية وتثبيت روابط الصور ومطابقة الأقسام)
+function processAndOpenBatchReview(rawItems, modalTitle, warnings) {
   const existingProducts = Store.getAdminProducts();
   const categories = Store.getCategories();
 
@@ -1220,24 +1506,20 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
 
     let matchedCatId = existing ? existing.categoryId : "";
     if (!matchedCatId && item.category) {
-      const cleanSuggested = cleanNameForMatch(item.category);
-      const foundCat = categories.find(c => {
-        const cleanCatName = cleanNameForMatch(c.name);
-        return cleanCatName === cleanSuggested || 
-               cleanCatName.includes(cleanSuggested) || 
-               cleanSuggested.includes(cleanCatName);
-      });
+      const foundCat = matchCategory(item.category, categories);
       if (foundCat) matchedCatId = foundCat.id;
     }
 
     const existingColors = existing && existing.colors ? existing.colors.map(c => c.name) : [];
     const existingSizes = existing && existing.sizes ? existing.sizes : [];
 
+    // تنقية الألوان واستبعاد الأوصاف الشفافة أو المائية
     const rawColorsList = (item.colors && item.colors.length) ? item.colors : existingColors;
     const filteredColors = (rawColorsList || [])
       .map(c => cleanColorName(String(c)))
       .filter(c => c && !isTransparentOrInvalidColor(c));
 
+    // تنقية وتثبيت رابط الصورة
     let cleanImageUrl = (item.image || "").trim();
     if (cleanImageUrl) {
       const urlMatch = cleanImageUrl.match(/https?:\/\/[^\s"'<>]+/);
@@ -1249,10 +1531,10 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
 
     return {
       name: item.name,
-      category: item.category || "",
+      category: String(item.category || "").split("›").pop().trim(),   // اسم الفرعي فقط إن لم يُطابق (لا ننشئ قسماً اسمه «أب › فرعي»)
       categoryId: matchedCatId,
       price: item.price || (existing ? existing.price : 0),
-      stock: item.qty || 1,
+      stock: Number.isFinite(Number(item.qty)) ? Number(item.qty) : 1,
       currentStock: existing ? (Number(existing.stock) || 0) : null,
       barcode: item.barcode || (existing ? (existing.barcode || existing.sku) : ""),
       description: item.description || (existing ? existing.description : ""),
@@ -1265,9 +1547,20 @@ function processAndOpenBatchReview(rawItems, modalTitle) {
 
   hideProcessLoader();
   renderBatchReviewCards(mappedItems, modalTitle);
-  showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
+  const warnList = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  if (warnList.length) {
+    // التحذيرات تبقى ظاهرة في رأس نافذة المراجعة (لا تختفي مع التوست) كي لا يحفظ المدير ناقصاً دون أن يعلم
+    const statusText = document.getElementById("shelfScanStatus");
+    if (statusText) statusText.textContent += " — ⚠️ " + warnList.join(" • ");
+    showToast(`تم استخراج ${mappedItems.length} صنف، لكن: ${warnList[0]}${warnList.length > 1 ? " (+" + (warnList.length - 1) + " تنبيه)" : ""}`, "error");
+  } else {
+    showToast(`تم استخراج ${mappedItems.length} صنف بنجاح ✨`, "success");
+  }
 }
 
+/* ---------------------------------------------------------------------- */
+/* 4) ربط زر استيراد الإكسل المباشر ليعمل بنفس دقة الذكاء الاصطناعي        */
+/* ---------------------------------------------------------------------- */
 function wireExcelSync() {
   const fileInput = document.getElementById("excelSyncInput");
   if (!fileInput || fileInput.dataset.wired) return;
@@ -1286,10 +1579,33 @@ function wireExcelSync() {
 }
 
 /* ---------------------------------------------------------------------- */
-/* دالة رفع الصور الأصلية المباشرة والمجربة (ImgBB -> ImageKit CDN)       */
+/* رفع ومعالجة الصور عبر ImgBB و ImageKit CDN                             */
 /* ---------------------------------------------------------------------- */
+// تصغير الصورة قبل الرفع: صور الهاتف 5–12MB كانت تُرفض (>4MB) أو تبقى ترفع دقائق على شبكة الجوال.
+// الضلع الأطول ≤ 1600px (البانر 2000) وJPEG 0.85؛ ImageKit يحوّلها لاحقاً إلى WebP.
+async function compressImageForUpload(file, maxSide) {
+  try {
+    if (!file || !/^image\/(jpeg|png|webp)$/i.test(file.type || "")) return file;
+    const url = URL.createObjectURL(file);
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("decode")); i.src = url; }).finally(() => URL.revokeObjectURL(url));
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale === 1 && file.size <= 700 * 1024) return file;       // صغيرة أصلاً
+    const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const blob = await new Promise(r => canvas.toBlob(r, "image/jpeg", 0.85));
+    return blob && blob.size < file.size ? blob : file;
+  } catch (e) {
+    return file;                                                    // فشل التصغير ← نرفع الأصل كما كان
+  }
+}
+
 async function uploadToImgBB(file, isBanner = false) {
   if (!file) throw new Error("لم يتم اختيار ملف");
+  file = await compressImageForUpload(file, isBanner ? 2000 : 1600);
 
   const MAX_SIZE_MB = 4;
   const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
@@ -1306,23 +1622,25 @@ async function uploadToImgBB(file, isBanner = false) {
     throw new Error("لم يتم ضبط مفتاح imgbbApiKey في js/config.js.");
   }
 
-  const formData = new FormData();
-  // التأكد من إرسال اسم ملف دائماً حتى لو كانت الصورة كائن Blob
-  if (file instanceof Blob && !(file instanceof File)) {
-    formData.append("image", file, "image.jpg");
-  } else {
-    formData.append("image", file);
+  // مهلة 45 ثانية + محاولة ثانية: بدونها يبقى الرفع معلّقاً إلى الأبد إذا توقف الاتصال (كان شاشة «جارٍ الحفظ» لا تنتهي)
+  let data = null, lastErr = null;
+  for (let attempt = 0; attempt < 2 && !(data && data.success); attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 45000);
+    try {
+      const formData = new FormData();
+      formData.append("image", file, file.name || "image.jpg");
+      const response = await fetch("https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey), {
+        method: "POST", body: formData, signal: ctrl.signal
+      });
+      data = await response.json();
+      if (!data.success) lastErr = new Error((data.error && data.error.message) || "فشل رفع الصورة إلى ImgBB.");
+    } catch (e) {
+      data = null;
+      lastErr = (e && e.name === "AbortError") ? new Error("انتهت مهلة رفع الصورة (اتصال بطيء).") : new Error("تعذّر الاتصال بـ ImgBB. تحقق من الإنترنت.");
+    } finally { clearTimeout(timer); }
   }
-
-  const response = await fetch("https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey), {
-    method: "POST",
-    body: formData
-  });
-
-  const data = await response.json();
-  if (!data.success) {
-    throw new Error((data.error && data.error.message) || "فشل رفع الصورة إلى ImgBB.");
-  }
+  if (!data || !data.success) throw lastErr || new Error("فشل رفع الصورة إلى ImgBB.");
 
   const rawUrl = data.data.url;
   const imageKitEndpoint = (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG.imageKitEndpoint || "").trim().replace(/\/+$/, "");
@@ -1338,6 +1656,9 @@ async function uploadToImgBB(file, isBanner = false) {
   return imageKitEndpoint + "/" + transform + "/" + match[1];
 }
 
+/* ---------------------------------------------------------------------- */
+/* التنقل والقائمة الجانبية                                              */
+/* ---------------------------------------------------------------------- */
 function wireSidebarNav() {
   const buttons = document.querySelectorAll(".admin-nav button[data-panel]");
   buttons.forEach(function (btn) {
@@ -1362,6 +1683,9 @@ window.toggleAdminSidebar = function() {
   if (overlay) overlay.classList.toggle('active');
 };
 
+/* ---------------------------------------------------------------------- */
+/* لوحة الإحصائيات                                                       */
+/* ---------------------------------------------------------------------- */
 function renderStats() {
   renderOutOfStock();
   const products = Store.getAdminProducts();
@@ -1379,6 +1703,9 @@ function renderStats() {
   }).join("");
 }
 
+/* ---------------------------------------------------------------------- */
+/* جدول المنتجات (مع فرز الأحدث أولاً دائماً)                             */
+/* ---------------------------------------------------------------------- */
 const ADMIN_PRODUCTS_PAGE_SIZE = 40;
 let adminProductsShown = ADMIN_PRODUCTS_PAGE_SIZE;
 let adminProductsLastQuery = "";
@@ -1503,6 +1830,7 @@ function renderProductsTable() {
   let products = Store.getAdminProducts().filter(Boolean);
   if (query) products = products.filter(function (p) { return adminProductMatches(p, query); });
 
+  // فرز المنتجات تنازلياً ليظهر الأحدث إضافتاً أو تعديلاً أولاً دائماً
   products.sort((a, b) => {
     const timeA = Number(a.createdAt || a.updatedAt || 0);
     const timeB = Number(b.createdAt || b.updatedAt || 0);
@@ -1579,6 +1907,9 @@ function populateCategorySelect() {
   }).join("");
 }
 
+/* ---------------------------------------------------------------------- */
+/* إدارة الألوان والمقاسات والمودال                                       */
+/* ---------------------------------------------------------------------- */
 function currentSizesFromInput() {
   const input = document.getElementById("productSizes");
   if (!input) return [];
@@ -1935,6 +2266,7 @@ async function saveProductForm(e) {
     return;
   }
 
+  // تنقية الألوان واستبعاد أي لون شفاف أو قوام مائي
   const cleanColors = pendingColors
     .filter(function (c) { 
       return (c.name && c.name.trim() && !isTransparentOrInvalidColor(c.name)) || c.image; 
@@ -2060,6 +2392,9 @@ async function saveProductForm(e) {
   renderStats();
 }
 
+/* ---------------------------------------------------------------------- */
+/* جداول الأقسام والإعلانات والطلبات والإعدادات                            */
+/* ---------------------------------------------------------------------- */
 function renderCategoriesTable() {
   const tbody = document.getElementById("categoriesTableBody");
   if (!tbody) return;
